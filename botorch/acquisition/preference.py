@@ -28,8 +28,6 @@ and its MC-based generalization qEUBO as proposed in [Astudillo2023qeubo]_.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 from botorch.acquisition import AnalyticAcquisitionFunction
 from botorch.acquisition.monte_carlo import MCAcquisitionFunction
@@ -39,6 +37,7 @@ from botorch.models.deterministic import DeterministicModel
 from botorch.models.model import Model
 from botorch.sampling.base import MCSampler
 from botorch.utils.transforms import (
+    average_over_ensemble_models,
     concatenate_pending_points,
     match_batch_shape,
     t_batch_mode_transform,
@@ -55,8 +54,8 @@ class AnalyticExpectedUtilityOfBestOption(AnalyticAcquisitionFunction):
     def __init__(
         self,
         pref_model: Model,
-        outcome_model: Optional[DeterministicModel] = None,
-        previous_winner: Optional[Tensor] = None,
+        outcome_model: DeterministicModel | None = None,
+        previous_winner: Tensor | None = None,
     ) -> None:
         r"""Analytic implementation of Expected Utility of the Best Option under the
         Laplace model (assumes a PairwiseGP is used as the preference model) as
@@ -68,7 +67,7 @@ class AnalyticExpectedUtilityOfBestOption(AnalyticAcquisitionFunction):
             outcome_model: A deterministic model that maps parameters (i.e., X) to
                 outcomes (i.e., Y). The outcome model f defines the search space of
                 Y = f(X). If model is None, we are directly calculating EUBO on
-                the parameter space. When used with `OneSamplePosteriorDrawModel`,
+                the parameter space. When used with ``OneSamplePosteriorDrawModel``,
                 we are obtaining EUBO-zeta as described in [Lin2022preference]_.
             previous_winner: Tensor representing the previous winner in the Y space.
         """
@@ -88,23 +87,24 @@ class AnalyticExpectedUtilityOfBestOption(AnalyticAcquisitionFunction):
         self.std_norm = std_norm
 
     @t_batch_mode_transform()
+    @average_over_ensemble_models
     def forward(self, X: Tensor) -> Tensor:
         r"""Evaluate analytical EUBO on the candidate set X.
 
         Args:
-            X: A `batch_shape x q x d`-dim Tensor, where `q = 2` if `previous_winner`
-                is not `None`, and `q = 1` otherwise.
+            X: A ``batch_shape x q x d``-dim Tensor, where ``q = 2`` if
+                ``previous_winner`` is ``None``, and ``q = 1`` otherwise.
 
         Returns:
-            The acquisition value for each batch as a tensor of shape `batch_shape`.
+            The acquisition value for each batch as a tensor of shape ``batch_shape``.
         """
         if not (
             ((X.shape[-2] == 2) and (self.previous_winner is None))
             or ((X.shape[-2] == 1) and (self.previous_winner is not None))
         ):
             raise UnsupportedError(
-                f"{self.__class__.__name__} only support q=2 or q=1"
-                "with a previous winner specified"
+                f"{self.__class__.__name__} only supports q=2 (no previous "
+                "winner specified) or q=1 (previous winner specified)."
             )
 
         Y = X if self.outcome_model is None else self.outcome_model(X)
@@ -136,20 +136,20 @@ class qExpectedUtilityOfBestOption(MCAcquisitionFunction):
 
     This computes qEUBO by
     (1) sampling the joint posterior over q points
-    (2) evaluating the maximum objective value accross the q points
+    (2) evaluating the maximum objective value across the q points
     (3) averaging over the samples
 
-    `qEUBO(X) = E[max Y], Y ~ f(X), where X = (x_1,...,x_q)`
+    ``qEUBO(X) = E[max Y], Y ~ f(X), where X = (x_1,...,x_q)``
     """
 
     def __init__(
         self,
         pref_model: Model,
-        outcome_model: Optional[DeterministicModel] = None,
-        sampler: Optional[MCSampler] = None,
-        objective: Optional[MCAcquisitionObjective] = None,
-        posterior_transform: Optional[PosteriorTransform] = None,
-        X_pending: Optional[Tensor] = None,
+        outcome_model: DeterministicModel | None = None,
+        sampler: MCSampler | None = None,
+        objective: MCAcquisitionObjective | None = None,
+        posterior_transform: PosteriorTransform | None = None,
+        X_pending: Tensor | None = None,
     ) -> None:
         r"""MC-based Expected Utility of Best Option (qEUBO) as proposed
         in [Astudillo2023qeubo]_.
@@ -161,12 +161,12 @@ class qExpectedUtilityOfBestOption(MCAcquisitionFunction):
                 outcomes (i.e., Y). The outcome model f defines the search space of
                 Y = f(X). If model is None, we are directly calculating qEUBO on
                 the parameter space.
-             sampler: The sampler used to draw base samples. See `MCAcquisitionFunction`
-                more details.
+             sampler: The sampler used to draw base samples. See
+                ``MCAcquisitionFunction`` more details.
             objective: The MCAcquisitionObjective under which the samples are evaluated.
-                Defaults to `IdentityMCObjective()`.
+                Defaults to ``IdentityMCObjective()``.
             posterior_transform: A PosteriorTransform (optional).
-            X_pending:  A `m x d`-dim Tensor of `m` design points that have been
+            X_pending:  A ``m x d``-dim Tensor of ``m`` design points that have been
                 submitted for function evaluation but have not yet been evaluated.
                 Concatenated into X upon forward call. Copied and set
                 to have no gradient.
@@ -183,17 +183,18 @@ class qExpectedUtilityOfBestOption(MCAcquisitionFunction):
 
     @concatenate_pending_points
     @t_batch_mode_transform()
+    @average_over_ensemble_models
     def forward(self, X: Tensor) -> Tensor:
-        r"""Evaluate qEUBO on the candidate set `X`.
+        r"""Evaluate qEUBO on the candidate set ``X``.
 
         Args:
-            X: A `batch_shape x q x d`-dim Tensor of t-batches with `q`
-                `d`-dim design points each.
+            X: A ``batch_shape x q x d``-dim Tensor of t-batches with ``q``
+                ``d``-dim design points each.
 
         Returns:
-            A `batch_shape'`-dim Tensor of qEUBO values at the given design
-            points `X`, where `batch_shape'` is the broadcasted batch shape
-            of model and input `X`.
+            A ``batch_shape'``-dim Tensor of qEUBO values at the given design
+            points ``X``, where ``batch_shape'`` is the broadcasted batch shape
+            of model and input ``X``.
         """
         Y = X if self.outcome_model is None else self.outcome_model(X)
 
@@ -208,9 +209,9 @@ class PairwiseBayesianActiveLearningByDisagreement(MCAcquisitionFunction):
     def __init__(
         self,
         pref_model: Model,
-        outcome_model: Optional[DeterministicModel] = None,
-        num_samples: Optional[int] = 1024,
-        std_noise: Optional[float] = 0.0,
+        outcome_model: DeterministicModel | None = None,
+        num_samples: int | None = 1024,
+        std_noise: float | None = 0.0,
     ) -> None:
         """
         Monte Carlo implementation of Bayesian Active Learning by Disagreement (BALD)
@@ -236,17 +237,18 @@ class PairwiseBayesianActiveLearningByDisagreement(MCAcquisitionFunction):
         self.std_normal = Normal(0, 1)
 
     @t_batch_mode_transform(expected_q=2)
+    @average_over_ensemble_models
     def forward(self, X: Tensor) -> Tensor:
-        r"""Evaluate MC BALD on the candidate set `X`.
+        r"""Evaluate MC BALD on the candidate set ``X``.
 
         Args:
-            X: A `batch_shape x 2 x d`-dim Tensor of t-batches with `q=2`
-                `d`-dim design points each.
+            X: A ``batch_shape x 2 x d``-dim Tensor of t-batches with ``q=2``
+                ``d``-dim design points each.
 
         Returns:
-            A `batch_shape'`-dim Tensor of MC BALD values at the given
-            design points pair `X`, where `batch_shape'` is the broadcasted
-            batch shape of model and input `X`.
+            A ``batch_shape'``-dim Tensor of MC BALD values at the given
+            design points pair ``X``, where ``batch_shape'`` is the broadcasted
+            batch shape of model and input ``X``.
         """
         Y = X if self.outcome_model is None else self.outcome_model(X)
 

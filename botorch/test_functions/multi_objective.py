@@ -76,7 +76,6 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from math import pi
-from typing import List, Tuple, Union
 
 import torch
 from botorch.exceptions.errors import UnsupportedError
@@ -111,6 +110,7 @@ class BraninCurrin(MultiObjectiveTestProblem):
     """
 
     dim = 2
+    continuous_inds = list(range(2))
     num_objectives = 2
     _bounds = [(0.0, 1.0), (0.0, 1.0)]
     _ref_point = [18.0, 6.0]
@@ -118,15 +118,17 @@ class BraninCurrin(MultiObjectiveTestProblem):
 
     def __init__(
         self,
-        noise_std: Union[None, float, List[float]] = None,
+        noise_std: None | float | list[float] = None,
         negate: bool = False,
+        dtype: torch.dtype = torch.double,
     ) -> None:
         r"""
         Args:
             noise_std: Standard deviation of the observation noise.
             negate: If True, negate the objectives.
+            dtype: The dtype that is used for the bounds of the function.
         """
-        super().__init__(noise_std=noise_std, negate=negate)
+        super().__init__(noise_std=noise_std, negate=negate, dtype=dtype)
         self._branin = Branin()
 
     def _rescaled_branin(self, X: Tensor) -> Tensor:
@@ -144,8 +146,8 @@ class BraninCurrin(MultiObjectiveTestProblem):
         denom = 100 * x_0.pow(3) + 500 * x_0.pow(2) + 4 * x_0 + 20
         return factor1 * numer / denom
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
-        # branin rescaled with inputsto [0,1]^2
+    def _evaluate_true(self, X: Tensor) -> Tensor:
+        # branin rescaled with inputs to [0,1]^2
         branin = self._rescaled_branin(X=X)
         currin = self._currin(X=X)
         return torch.stack([branin, currin], dim=-1)
@@ -156,8 +158,9 @@ class DH(MultiObjectiveTestProblem, ABC):
 
     In their paper, [Deb2005robust]_ consider these problems under a mean-robustness
     setting, and use uniformly distributed input perturbations from the box with
-    edge lengths `delta_0 = delta`, `delta_i = 2 * delta, i > 0`, with `delta` ranging
-    up to `0.01` for DH1 and DH2, and `delta = 0.03` for DH3 and DH4.
+    edge lengths ``delta_0 = delta``, ``delta_i = 2 * delta, i > 0``, with
+    ``delta`` ranging up to ``0.01`` for DH1 and DH2, and ``delta = 0.03`` for
+    DH3 and DH4.
 
     These are d-dimensional problems with two objectives:
 
@@ -166,11 +169,11 @@ class DH(MultiObjectiveTestProblem, ABC):
         f_1(x) = h(x) * (g(x) + S(x)) for DH3 and DH4
 
     The goal is to minimize both objectives. See [Deb2005robust]_ for more details
-    on DH. The reference points were set using `infer_reference_point`.
+    on DH. The reference points were set using ``infer_reference_point``.
     """
 
     num_objectives = 2
-    _ref_point: List[float] = [1.1, 1.1]
+    _ref_point: list[float] = [1.1, 1.1]
     _x_1_lb: float
     _area_under_curve: float
     _min_dim: int
@@ -178,24 +181,27 @@ class DH(MultiObjectiveTestProblem, ABC):
     def __init__(
         self,
         dim: int,
-        noise_std: Union[None, float, List[float]] = None,
+        noise_std: None | float | list[float] = None,
         negate: bool = False,
+        dtype: torch.dtype = torch.double,
     ) -> None:
         r"""
         Args:
             dim: The (input) dimension.
             noise_std: Standard deviation of the observation noise.
             negate: If True, negate the function.
+            dtype: The dtype that is used for the bounds of the function.
         """
         if dim < self._min_dim:
             raise ValueError(f"dim must be >= {self._min_dim}, but got dim={dim}!")
         self.dim = dim
+        self.continuous_inds = list(range(dim))
         self._bounds = [(0.0, 1.0), (self._x_1_lb, 1.0)] + [
             (-1.0, 1.0) for _ in range(dim - 2)
         ]
         # max_hv is the area of the box minus the area of the curve formed by the PF.
         self._max_hv = self._ref_point[0] * self._ref_point[1] - self._area_under_curve
-        super().__init__(noise_std=noise_std, negate=negate)
+        super().__init__(noise_std=noise_std, negate=negate, dtype=dtype)
 
     @abstractmethod
     def _h(self, X: Tensor) -> Tensor:
@@ -213,7 +219,7 @@ class DH(MultiObjectiveTestProblem, ABC):
 class DH1(DH):
     r"""DH1 test problem.
 
-    d-dimensional problem evaluated on `[0, 1] x [-1, 1]^{d-1}`:
+    d-dimensional problem evaluated on ``[0, 1] x [-1, 1]^{d-1}``:
 
         f_0(x) = x_0
         f_1(x) = h(x_0) + g(x) * S(x_0)
@@ -223,8 +229,8 @@ class DH1(DH):
 
     where alpha = 1 and beta = 1.
 
-    The Pareto front corresponds to the equation `f_1 = 1 - f_0^2`, and it is found at
-    `x_i = 0` for `i > 0` and any value of `x_0` in `(0, 1]`.
+    The Pareto front corresponds to the equation ``f_1 = 1 - f_0^2``, and it is found at
+    ``x_i = 0`` for ``i > 0`` and any value of ``x_0`` in ``(0, 1]``.
     """
 
     alpha = 1.0
@@ -247,7 +253,7 @@ class DH1(DH):
         x_0 = X[..., 0]
         return self.alpha / (0.2 + x_0) + self.beta * x_0.pow(2)
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         f_0 = X[..., 0]
         # This may encounter 0 / 0, which we set to 0.
         f_1 = self._h(X) + torch.nan_to_num(self._g(X) * self._S(X))
@@ -257,7 +263,7 @@ class DH1(DH):
 class DH2(DH1):
     r"""DH2 test problem.
 
-    This is identical to DH1 except for having `beta = 10.0`.
+    This is identical to DH1 except for having ``beta = 10.0``.
     """
 
     beta = 10.0
@@ -266,7 +272,7 @@ class DH2(DH1):
 class DH3(DH):
     r"""DH3 test problem.
 
-    d-dimensional problem evaluated on `[0, 1]^2 x [-1, 1]^{d-2}`:
+    d-dimensional problem evaluated on ``[0, 1]^2 x [-1, 1]^{d-2}``:
 
         f_0(x) = x_0
         f_1(x) = h(x_1) * (g(x) + S(x_0))
@@ -274,11 +280,12 @@ class DH3(DH):
         g(x) = \sum_{i=2}^{d-1} (50 * x_i^2)
         S(x_0) = 1 - sqrt(x_0)
 
-    The Pareto front is found at `x_i = 0` for `i > 1`. There's a local and a global
-    Pareto front, which are found at `x_1 = 0.35` and `x_1 = 0.85`, respectively.
+    The Pareto front is found at ``x_i = 0`` for ``i > 1``. There's a local and a global
+    Pareto front, which are found at ``x_1 = 0.35`` and ``x_1 = 0.85``, respectively.
     The approximate relationships between the objectives at local and global Pareto
-    fronts are given by `f_1 = 1.2 (1 - sqrt(f_0))` and `f_1 = 1 - f_0`, respectively.
-    The specific values on the Pareto fronts can be found by varying `x_0`.
+    fronts are given by ``f_1 = 1.2 (1 - sqrt(f_0))`` and ``f_1 = 1 - f_0``,
+    respectively. The specific values on the Pareto fronts can be found by varying
+    ``x_0``.
     """
 
     _x_1_lb = 0.0
@@ -286,7 +293,7 @@ class DH3(DH):
     _min_dim = 3
 
     @staticmethod
-    def _exp_args(x: Tensor) -> Tuple[Tensor, Tensor]:
+    def _exp_args(x: Tensor) -> tuple[Tensor, Tensor]:
         exp_arg_1 = -((x - 0.35) / 0.25).pow(2)
         exp_arg_2 = -((x - 0.85) / 0.03).pow(2)
         return exp_arg_1, exp_arg_2
@@ -301,7 +308,7 @@ class DH3(DH):
     def _S(self, X: Tensor) -> Tensor:
         return 1 - X[..., 0].sqrt()
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         f_0 = X[..., 0]
         f_1 = self._h(X) * (self._g(X) + self._S(X))
         return torch.stack([f_0, f_1], dim=-1)
@@ -311,13 +318,13 @@ class DH4(DH3):
     r"""DH4 test problem.
 
     This is similar to DH3 except that it is evaluated on
-    `[0, 1] x [-0.15, 1] x [-1, 1]^{d-2}` and:
+    ``[0, 1] x [-0.15, 1] x [-1, 1]^{d-2}`` and:
 
         h(x_0, x_1) = 2 - x_0 - 0.8 * exp(-((x_0 + x_1 - 0.35) / 0.25)^2)
         - exp(-((x_0 + x_1 - 0.85) / 0.03)^2)
 
-    The Pareto front is found at `x_i = 0` for `i > 2`, with the local one being
-    near `x_0 + x_1 = 0.35` and the global one near `x_0 + x_1 = 0.85`.
+    The Pareto front is found at ``x_i = 0`` for ``i > 2``, with the local one being
+    near ``x_0 + x_1 = 0.35`` and the global one near ``x_0 + x_1 = 0.85``.
     """
 
     _x_1_lb = -0.15
@@ -338,8 +345,9 @@ class DTLZ(MultiObjectiveTestProblem):
         self,
         dim: int,
         num_objectives: int = 2,
-        noise_std: Union[None, float, List[float]] = None,
+        noise_std: None | float | list[float] = None,
         negate: bool = False,
+        dtype: torch.dtype = torch.double,
     ) -> None:
         r"""
         Args:
@@ -347,6 +355,7 @@ class DTLZ(MultiObjectiveTestProblem):
             num_objectives: Must be less than dim.
             noise_std: Standard deviation of the observation noise.
             negate: If True, negate the function.
+            dtype: The dtype that is used for the bounds of the function.
         """
         if dim <= num_objectives:
             raise ValueError(
@@ -354,16 +363,17 @@ class DTLZ(MultiObjectiveTestProblem):
             )
         self.num_objectives = num_objectives
         self.dim = dim
+        self.continuous_inds = list(range(dim))
         self.k = self.dim - self.num_objectives + 1
         self._bounds = [(0.0, 1.0) for _ in range(self.dim)]
         self._ref_point = [self._ref_val for _ in range(num_objectives)]
-        super().__init__(noise_std=noise_std, negate=negate)
+        super().__init__(noise_std=noise_std, negate=negate, dtype=dtype)
 
 
 class DTLZ1(DTLZ):
-    r"""DLTZ1 test problem.
+    r"""DTLZ1 test problem.
 
-    d-dimensional problem evaluated on `[0, 1]^d`:
+    d-dimensional problem evaluated on ``[0, 1]^d``:
 
         f_0(x) = 0.5 * x_0 * (1 + g(x))
         f_1(x) = 0.5 * (1 - x_0) * (1 + g(x))
@@ -383,7 +393,7 @@ class DTLZ1(DTLZ):
     def _max_hv(self) -> float:
         return self._ref_val**self.num_objectives - 1 / 2**self.num_objectives
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         X_m = X[..., -self.k :]
         X_m_minus_half = X_m - 0.5
         sum_term = (
@@ -401,7 +411,7 @@ class DTLZ1(DTLZ):
         return torch.stack(fs, dim=-1)
 
     def gen_pareto_front(self, n: int) -> Tensor:
-        r"""Generate `n` pareto optimal points.
+        r"""Generate ``n`` pareto optimal points.
 
         The pareto points randomly sampled from the hyperplane sum_i f(x_i) = 0.5.
         """
@@ -418,9 +428,9 @@ class DTLZ1(DTLZ):
 
 
 class DTLZ2(DTLZ):
-    r"""DLTZ2 test problem.
+    r"""DTLZ2 test problem.
 
-    d-dimensional problem evaluated on `[0, 1]^d`:
+    d-dimensional problem evaluated on ``[0, 1]^d``:
 
         f_0(x) = (1 + g(x)) * cos(x_0 * pi / 2)
         f_1(x) = (1 + g(x)) * sin(x_0 * pi / 2)
@@ -445,7 +455,7 @@ class DTLZ2(DTLZ):
         )
         return hypercube_vol - pos_hypersphere_vol
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         X_m = X[..., -self.k :]
         g_X = (X_m - 0.5).pow(2).sum(dim=-1)
         g_X_plus1 = 1 + g_X
@@ -461,7 +471,7 @@ class DTLZ2(DTLZ):
         return torch.stack(fs, dim=-1)
 
     def gen_pareto_front(self, n: int) -> Tensor:
-        r"""Generate `n` pareto optimal points.
+        r"""Generate ``n`` pareto optimal points.
 
         The pareto points are randomly sampled from the hypersphere's
         positive section.
@@ -481,13 +491,13 @@ class DTLZ2(DTLZ):
 class DTLZ3(DTLZ2):
     r"""DTLZ3 test problem.
 
-    d-dimensional problem evaluated on `[0, 1]^d`:
+    d-dimensional problem evaluated on ``[0, 1]^d``:
 
         f_0(x) = (1 + g(x)) * cos(x_0 * pi / 2)
         f_1(x) = (1 + g(x)) * sin(x_0 * pi / 2)
         g(x) = 100 * [k + \sum_{i=m}^{n-1} (x_i - 0.5)^2 - cos(20 * pi * (x_i - 0.5))]
 
-    `g(x)` introduces (`3k−1`) local Pareto fronts that are parallel to
+    ``g(x)`` introduces (``3k−1``) local Pareto fronts that are parallel to
     the one global Pareto-optimal front.
 
     The global Pareto-optimal front corresponds to x_i = 0.5 for x_i in X_m.
@@ -495,7 +505,7 @@ class DTLZ3(DTLZ2):
 
     _ref_val = 10000.0
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         X_m = X[..., -self.k :]
         g_X = 100 * (
             X_m.shape[-1]
@@ -529,7 +539,7 @@ class DTLZ4(DTLZ2):
 class DTLZ5(DTLZ):
     r"""DTLZ5 test problem.
 
-    d-dimensional problem evaluated on `[0, 1]^d`:
+    d-dimensional problem evaluated on ``[0, 1]^d``:
 
         f_0(x) = (1 + g(x)) * cos(theta_0 * pi / 2)
         f_1(x) = (1 + g(x)) * sin(theta_0 * pi / 2)
@@ -541,7 +551,7 @@ class DTLZ5(DTLZ):
 
     _ref_val = 10.0
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         X_m = X[..., -self.k :]
         X_ = X[..., : -self.k]
         g_X = (X_m - 0.5).pow(2).sum(dim=-1)
@@ -562,7 +572,7 @@ class DTLZ5(DTLZ):
 class DTLZ7(DTLZ):
     r"""DTLZ7 test problem.
 
-    d-dimensional problem evaluated on `[0, 1]^d`:
+    d-dimensional problem evaluated on ``[0, 1]^d``:
         f_0(x) = x_0
         f_1(x) = x_1
         ...
@@ -577,7 +587,7 @@ class DTLZ7(DTLZ):
 
     _ref_val = 15.0
 
-    def evaluate_true(self, X):
+    def _evaluate_true(self, X):
         f = []
         for i in range(0, self.num_objectives - 1):
             f.append(X[..., i])
@@ -602,19 +612,22 @@ class GMM(MultiObjectiveTestProblem):
     """
 
     dim = 2
+    continuous_inds = list(range(dim))
     _bounds = [(0.0, 1.0), (0.0, 1.0)]
 
     def __init__(
         self,
-        noise_std: Union[None, float, List[float]] = None,
+        noise_std: None | float | list[float] = None,
         negate: bool = False,
         num_objectives: int = 2,
+        dtype: torch.dtype = torch.double,
     ) -> None:
         r"""
         Args:
             noise_std: Standard deviation of the observation noise.
             negate: If True, negate the objectives.
             num_objectives: The number of objectives.
+            dtype: The dtype that is used for the bounds of the function.
         """
         if num_objectives not in (2, 3, 4):
             raise UnsupportedError("GMM only currently supports 2 to 4 objectives.")
@@ -624,7 +637,7 @@ class GMM(MultiObjectiveTestProblem):
         if num_objectives > 3:
             self._ref_point.append(-0.1866)
         self.num_objectives = num_objectives
-        super().__init__(noise_std=noise_std, negate=negate)
+        super().__init__(noise_std=noise_std, negate=negate, dtype=dtype)
         gmm_pos = torch.tensor(
             [
                 [[0.2, 0.2], [0.8, 0.2], [0.5, 0.7]],
@@ -670,10 +683,10 @@ class GMM(MultiObjectiveTestProblem):
         self.register_buffer("gmm_covar", gmm_covar)
         self.register_buffer("gmm_norm", gmm_norm)
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         r"""Evaluate the GMMs."""
         # This needs to be reinstantiated because MVN apparently does not
-        # have a `to` method to make it device/dtype agnostic.
+        # have a ``to`` method to make it device/dtype agnostic.
         mvn = MultivariateNormal(loc=self.gmm_pos, covariance_matrix=self.gmm_covar)
         view_shape = (
             X.shape[:-1]
@@ -697,11 +710,13 @@ class Penicillin(MultiObjectiveTestProblem):
 
     The function is defined for minimization of all objectives.
 
-    The reference point was set using the `infer_reference_point` heuristic
-    on the Pareto frontier over a large discrete set of random designs.
+    The reference point was set using the ``infer_reference_point`` heuristic
+    on the Pareto frontier obtained via NSGA-II.
     """
 
+    _max_hv = 2183455.909507436
     dim = 7
+    continuous_inds = list(range(dim))
     num_objectives = 3
     _bounds = [
         (60.0, 120.0),
@@ -712,7 +727,7 @@ class Penicillin(MultiObjectiveTestProblem):
         (500.0, 700.0),
         (5.0, 6.5),
     ]
-    _ref_point = [1.85, 86.93, 514.70]
+    _ref_point = [25.935, 57.612, 935.5]
 
     Y_xs = 0.45
     Y_ps = 0.90
@@ -747,10 +762,10 @@ class Penicillin(MultiObjectiveTestProblem):
         rate, substrate feed concentration, and H+ concentration.
 
         Args:
-            X_input: A `n x 7`-dim tensor of inputs.
+            X_input: A ``n x 7``-dim tensor of inputs.
 
         Returns:
-            An `n x 3`-dim tensor of (negative) penicillin yield, CO2 and time.
+            An ``n x 3``-dim tensor of (negative) penicillin yield, CO2 and time.
         """
         V, X, T, S, F, s_f, H_ = torch.split(X_input, 1, -1)
         P, CO2 = torch.zeros_like(V), torch.zeros_like(V)
@@ -765,7 +780,7 @@ class Penicillin(MultiObjectiveTestProblem):
             F_loss = (
                 V[active]
                 * cls.lambd
-                * (torch.exp(5 * ((T[active] - cls.T_o) / (cls.T_v - cls.T_o))) - 1)
+                * torch.special.expm1(5 * ((T[active] - cls.T_o) / (cls.T_v - cls.T_o)))
             )
             dV_dt = F[active] - F_loss
             mu = (
@@ -812,7 +827,7 @@ class Penicillin(MultiObjectiveTestProblem):
 
         return torch.stack([-P, CO2, t_tensor], dim=-1)
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         # This uses in-place operations. Hence, the clone is to avoid modifying
         # the original X in-place.
         return self.penicillin_vectorized(X.view(-1, self.dim).clone()).view(
@@ -830,16 +845,21 @@ class ToyRobust(MultiObjectiveTestProblem):
 
     This function comes from [Daulton2022]_.
 
-    The reference point was set using the `infer_reference_point`
+    The reference point was set using the ``infer_reference_point``
     heuristic on the Pareto frontier over a large discrete set of
     random designs.
     """
 
     dim = 1
+    continuous_inds = list(range(dim))
     _bounds = [(0.0, 0.7)]
     _ref_point = [-6.1397, -8.1942]
     num_objectives = 2
     levy = Levy()
+
+    def forward(self, X: Tensor, noise: bool = True) -> Tensor:
+        self.levy.bounds = self.levy.bounds.to(X)
+        return super().forward(X=X, noise=noise)
 
     def f_1(self, X: Tensor) -> Tensor:
         p1 = 2.4 - 10 * X - 0.1 * X.pow(2)
@@ -860,7 +880,7 @@ class ToyRobust(MultiObjectiveTestProblem):
         Y -= X[..., :1].pow(2) * 0.75
         return Y
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         return -torch.cat([self.f_1(X), self.f_2(X)], dim=-1)
 
 
@@ -880,9 +900,10 @@ class VehicleSafety(MultiObjectiveTestProblem):
     _max_hv = 246.81607081187002
     _bounds = [(1.0, 3.0)] * 5
     dim = 5
+    continuous_inds = list(range(dim))
     num_objectives = 3
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         X1, X2, X3, X4, X5 = torch.split(X, 1, -1)
         f1 = (
             1640.2823
@@ -934,8 +955,9 @@ class ZDT(MultiObjectiveTestProblem):
         self,
         dim: int,
         num_objectives: int = 2,
-        noise_std: Union[None, float, List[float]] = None,
+        noise_std: None | float | list[float] = None,
         negate: bool = False,
+        dtype: torch.dtype = torch.double,
     ) -> None:
         r"""
         Args:
@@ -943,6 +965,7 @@ class ZDT(MultiObjectiveTestProblem):
             num_objectives: Number of objectives. Must not be larger than dim.
             noise_std: Standard deviation of the observation noise.
             negate: If True, negate the function.
+            dtype: The dtype that is used for the bounds of the function.
         """
         if num_objectives != 2:
             raise NotImplementedError(
@@ -954,8 +977,9 @@ class ZDT(MultiObjectiveTestProblem):
             )
         self.num_objectives = num_objectives
         self.dim = dim
+        self.continuous_inds = list(range(dim))
         self._bounds = [(0.0, 1.0) for _ in range(self.dim)]
-        super().__init__(noise_std=noise_std, negate=negate)
+        super().__init__(noise_std=noise_std, negate=negate, dtype=dtype)
 
     @staticmethod
     def _g(X: Tensor) -> Tensor:
@@ -965,7 +989,7 @@ class ZDT(MultiObjectiveTestProblem):
 class ZDT1(ZDT):
     r"""ZDT1 test problem.
 
-    d-dimensional problem evaluated on `[0, 1]^d`:
+    d-dimensional problem evaluated on ``[0, 1]^d``:
 
         f_0(x) = x_0
         f_1(x) = g(x) * (1 - sqrt(x_0 / g(x))
@@ -978,7 +1002,7 @@ class ZDT1(ZDT):
 
     _max_hv = 120 + 2 / 3
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         f_0 = X[..., 0]
         g = self._g(X=X)
         f_1 = g * (1 - (f_0 / g).sqrt())
@@ -998,7 +1022,7 @@ class ZDT1(ZDT):
 class ZDT2(ZDT):
     r"""ZDT2 test problem.
 
-    d-dimensional problem evaluated on `[0, 1]^d`:
+    d-dimensional problem evaluated on ``[0, 1]^d``:
 
         f_0(x) = x_0
         f_1(x) = g(x) * (1 - (x_0 / g(x))^2)
@@ -1011,7 +1035,7 @@ class ZDT2(ZDT):
 
     _max_hv = 120 + 1 / 3
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         f_0 = X[..., 0]
         g = self._g(X=X)
         f_1 = g * (1 - (f_0 / g).pow(2))
@@ -1031,7 +1055,7 @@ class ZDT2(ZDT):
 class ZDT3(ZDT):
     r"""ZDT3 test problem.
 
-    d-dimensional problem evaluated on `[0, 1]^d`:
+    d-dimensional problem evaluated on ``[0, 1]^d``:
 
         f_0(x) = x_0
         f_1(x) = 1 - sqrt(x_0 / g(x)) - x_0 / g * sin(10 * pi * x_0)
@@ -1055,7 +1079,7 @@ class ZDT3(ZDT):
     # nugget to make sure linspace returns elements within the specified range
     _eps = 1e-6
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         f_0 = X[..., 0]
         g = self._g(X=X)
         f_1 = 1 - (f_0 / g).sqrt() - f_0 / g * torch.sin(10 * math.pi * f_0)
@@ -1096,7 +1120,7 @@ class CarSideImpact(MultiObjectiveTestProblem):
 
     See [Tanabe2020]_ for details.
 
-    The reference point is `nadir + 0.1 * (ideal - nadir)`
+    The reference point is ``nadir + 0.1 * (ideal - nadir)``
     where the ideal and nadir points come from the approximate
     Pareto frontier from [Tanabe2020]_. The max_hv was computed
     based on the approximate Pareto frontier from [Tanabe2020]_.
@@ -1104,6 +1128,7 @@ class CarSideImpact(MultiObjectiveTestProblem):
 
     num_objectives: int = 4
     dim: int = 7
+    continuous_inds = list(range(dim))
     _bounds = [
         (0.5, 1.5),
         (0.45, 1.35),
@@ -1116,7 +1141,7 @@ class CarSideImpact(MultiObjectiveTestProblem):
     _ref_point = [45.4872, 4.5114, 13.3394, 10.3942]
     _max_hv = 484.72654347642793
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         X1, X2, X3, X4, X5, X6, X7 = torch.split(X, 1, -1)
         f1 = (
             1.98
@@ -1188,17 +1213,18 @@ class BNH(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
     """
 
     dim = 2
+    continuous_inds = list(range(dim))
     num_objectives = 2
     num_constraints = 2
     _bounds = [(0.0, 5.0), (0.0, 3.0)]
     _ref_point = [0.0, 0.0]  # TODO: Determine proper reference point
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         return torch.stack(
             [4.0 * X.pow(2).sum(dim=-1), (X - 5.0).pow(2).sum(dim=-1)], dim=-1
         )
 
-    def evaluate_slack_true(self, X: Tensor) -> Tensor:
+    def _evaluate_slack_true(self, X: Tensor) -> Tensor:
         c1 = 25.0 - (X[..., 0] - 5.0).pow(2) - X[..., 1].pow(2)
         c2 = (X[..., 0] - 8.0).pow(2) + (X[..., 1] + 3.0).pow(2) - 7.7
         return torch.stack([c1, c2], dim=-1)
@@ -1212,17 +1238,18 @@ class CONSTR(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
     """
 
     dim = 2
+    continuous_inds = list(range(dim))
     num_objectives = 2
     num_constraints = 2
     _bounds = [(0.1, 10.0), (0.0, 5.0)]
     _ref_point = [10.0, 10.0]
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         obj1 = X[..., 0]
         obj2 = (1.0 + X[..., 1]) / X[..., 0]
         return torch.stack([obj1, obj2], dim=-1)
 
-    def evaluate_slack_true(self, X: Tensor) -> Tensor:
+    def _evaluate_slack_true(self, X: Tensor) -> Tensor:
         c1 = 9.0 * X[..., 0] + X[..., 1] - 6.0
         c2 = 9.0 * X[..., 0] - X[..., 1] - 1.0
         return torch.stack([c1, c2], dim=-1)
@@ -1235,6 +1262,7 @@ class ConstrainedBraninCurrin(BraninCurrin, ConstrainedBaseTestProblem):
     """
 
     dim = 2
+    continuous_inds = list(range(dim))
     num_objectives = 2
     num_constraints = 1
     _bounds = [(0.0, 1.0), (0.0, 1.0)]
@@ -1244,9 +1272,10 @@ class ConstrainedBraninCurrin(BraninCurrin, ConstrainedBaseTestProblem):
 
     def __init__(
         self,
-        noise_std: Union[None, float, List[float]] = None,
-        constraint_noise_std: Union[None, float, List[float]] = None,
+        noise_std: None | float | list[float] = None,
+        constraint_noise_std: None | float | list[float] = None,
         negate: bool = False,
+        dtype: torch.dtype = torch.double,
     ) -> None:
         r"""
         Args:
@@ -1254,30 +1283,30 @@ class ConstrainedBraninCurrin(BraninCurrin, ConstrainedBaseTestProblem):
             constraint_noise_std: Standard deviation of the observation noise of the
                 constraint.
             negate: If True, negate the function.
+            dtype: The dtype that is used for the bounds of the function.
         """
-        super().__init__(noise_std=noise_std, negate=negate)
+        super().__init__(noise_std=noise_std, negate=negate, dtype=dtype)
         con_bounds = torch.tensor(self._con_bounds, dtype=self.bounds.dtype).transpose(
             -1, -2
         )
         self.register_buffer("con_bounds", con_bounds)
         self.constraint_noise_std = constraint_noise_std
 
-    def evaluate_slack_true(self, X: Tensor) -> Tensor:
+    def _evaluate_slack_true(self, X: Tensor) -> Tensor:
         X_tf = unnormalize(X, self.con_bounds)
         return 50 - (X_tf[..., 0:1] - 2.5).pow(2) - (X_tf[..., 1:2] - 7.5).pow(2)
 
 
 class C2DTLZ2(DTLZ2, ConstrainedBaseTestProblem):
-
     num_constraints = 1
     _r = 0.2
     # approximate from nsga-ii, TODO: replace with analytic
     _max_hv = 0.3996406303723544
 
-    def evaluate_slack_true(self, X: Tensor) -> Tensor:
+    def _evaluate_slack_true(self, X: Tensor) -> Tensor:
         if X.ndim > 2:
             raise NotImplementedError("Batch X is not supported.")
-        f_X = self.evaluate_true(X)
+        f_X = self.evaluate_true(X=X)
         term1 = (f_X - 1).pow(2)
         mask = ~(torch.eye(f_X.shape[-1], device=f_X.device).bool())
         indices = torch.arange(f_X.shape[1], device=f_X.device).repeat(f_X.shape[1], 1)
@@ -1302,18 +1331,19 @@ class DiscBrake(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
 
     See [Tanabe2020]_ for details.
 
-    The reference point was set using the `infer_reference_point`
+    The reference point was set using the ``infer_reference_point``
     heuristic on the Pareto frontier over a large discrete set of
     random designs.
     """
 
     dim = 4
+    continuous_inds = list(range(dim))
     num_objectives = 2
     num_constraints = 4
     _bounds = [(55.0, 80.0), (75.0, 110.0), (1000.0, 3000.0), (11.0, 20.0)]
     _ref_point = [5.7771, 3.9651]
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         f = torch.zeros(
             *X.shape[:-1], self.num_objectives, dtype=X.dtype, device=X.device
         )
@@ -1325,7 +1355,7 @@ class DiscBrake(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
 
         return f
 
-    def evaluate_slack_true(self, X: Tensor) -> Tensor:
+    def _evaluate_slack_true(self, X: Tensor) -> Tensor:
         g = torch.zeros(
             *X.shape[:-1], self.num_constraints, dtype=X.dtype, device=X.device
         )
@@ -1356,9 +1386,10 @@ class MW7(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
     def __init__(
         self,
         dim: int,
-        noise_std: Union[None, float, List[float]] = None,
-        constraint_noise_std: Union[None, float, List[float]] = None,
+        noise_std: None | float | list[float] = None,
+        constraint_noise_std: None | float | list[float] = None,
         negate: bool = False,
+        dtype: torch.dtype = torch.double,
     ) -> None:
         r"""
         Args:
@@ -1367,18 +1398,20 @@ class MW7(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
             constraint_noise_std: Standard deviation of the observation noise of the
                 constraints.
             negate: If True, negate the function.
+            dtype: The dtype that is used for the bounds of the function.
         """
         if dim < 2:
             raise ValueError("dim must be greater than or equal to 2.")
         self.dim = dim
+        self.continuous_inds = list(range(dim))
         self._bounds = [(0.0, 1.0) for _ in range(self.dim)]
-        super().__init__(noise_std=noise_std, negate=negate)
+        super().__init__(noise_std=noise_std, negate=negate, dtype=dtype)
         self.constraint_noise_std = constraint_noise_std
 
     def LA2(self, A, B, C, D, theta) -> Tensor:
         return A * torch.sin(B * theta.pow(C)).pow(D)
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         a = X[..., :-1] - 0.5
         contrib = 2 * (X[..., 1:] + a.pow(2) - 1).pow(2)
         g = 1 + contrib.sum(dim=-1)
@@ -1386,8 +1419,8 @@ class MW7(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
         f1 = g * torch.sqrt(1 - (f0 / g).pow(2))
         return torch.stack([f0, f1], dim=-1)
 
-    def evaluate_slack_true(self, X: Tensor) -> Tensor:
-        ff = self.evaluate_true(X)
+    def _evaluate_slack_true(self, X: Tensor) -> Tensor:
+        ff = self.evaluate_true(X=X)
         f0, f1 = ff[..., 0], ff[..., 1]
         atan = torch.arctan(f1 / f0)
         g0 = (
@@ -1408,6 +1441,7 @@ class OSY(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
     """
 
     dim = 6
+    continuous_inds = list(range(dim))
     num_constraints = 6
     num_objectives = 2
     _bounds = [
@@ -1420,7 +1454,7 @@ class OSY(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
     ]
     _ref_point = [-75.0, 75.0]
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         f1 = -(
             25 * (X[..., 0] - 2).pow(2)
             + (X[..., 1] - 2).pow(2)
@@ -1431,7 +1465,7 @@ class OSY(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
         f2 = X.pow(2).sum(-1)
         return torch.stack([f1, f2], dim=-1)
 
-    def evaluate_slack_true(self, X: Tensor) -> Tensor:
+    def _evaluate_slack_true(self, X: Tensor) -> Tensor:
         g1 = X[..., 0] + X[..., 1] - 2.0
         g2 = 6.0 - X[..., 0] - X[..., 1]
         g3 = 2.0 - X[..., 1] + X[..., 0]
@@ -1449,17 +1483,18 @@ class SRN(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
     """
 
     dim = 2
+    continuous_inds = list(range(dim))
     num_objectives = 2
     num_constraints = 2
     _bounds = [(-20.0, 20.0), (-20.0, 20.0)]
     _ref_point = [0.0, 0.0]  # TODO: Determine proper reference point
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         obj1 = 2.0 + (X - 2.0).pow(2).sum(dim=-1)
         obj2 = 9.0 * X[..., 0] - (X[..., 1] - 1.0).pow(2)
         return torch.stack([obj1, obj2], dim=-1)
 
-    def evaluate_slack_true(self, X: Tensor) -> Tensor:
+    def _evaluate_slack_true(self, X: Tensor) -> Tensor:
         c1 = 225.0 - (X.pow(2)).pow(2).sum(dim=-1)
         c2 = -10.0 - X[..., 0] + 3 * X[..., 1]
         return torch.stack([c1, c2], dim=-1)
@@ -1467,8 +1502,8 @@ class SRN(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
 
 class WeldedBeam(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
     r"""
-    The Welded Beam multi-objective test problem. Similar to `WeldedBeamSO` in
-    `botorch.test_function.synthetic`, but with an additional output, somewhat
+    The Welded Beam multi-objective test problem. Similar to ``WeldedBeamSO`` in
+    ``botorch.test_function.synthetic``, but with an additional output, somewhat
     modified constraints, and a different domain.
 
     Implementation from
@@ -1477,6 +1512,7 @@ class WeldedBeam(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
     """
 
     dim = 4
+    continuous_inds = list(range(dim))
     num_constraints = 4
     num_objectives = 2
     _bounds = [
@@ -1487,7 +1523,7 @@ class WeldedBeam(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
     ]
     _ref_point = [40, 0.015]
 
-    def evaluate_true(self, X: Tensor) -> Tensor:
+    def _evaluate_true(self, X: Tensor) -> Tensor:
         # We could do the following, but the constraints are using somewhat
         # different numbers (see below).
         # f1 = WeldedBeam.evaluate_true(self, X)
@@ -1496,7 +1532,7 @@ class WeldedBeam(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
         f2 = 2.1952 / (x4 * x3.pow(3))
         return torch.stack([f1, f2], dim=-1)
 
-    def evaluate_slack_true(self, X: Tensor) -> Tensor:
+    def _evaluate_slack_true(self, X: Tensor) -> Tensor:
         x1, x2, x3, x4 = X.unbind(-1)
         P = 6000.0
         L = 14.0
@@ -1513,7 +1549,7 @@ class WeldedBeam(MultiObjectiveTestProblem, ConstrainedBaseTestProblem):
 
         R = torch.sqrt(0.25 * (x2.pow(2) + (x1 + x3).pow(2)))
         M = P * (L + x2 / 2)
-        # This `J` is different than the one in [CoelloCoello2002constraint]_
+        # This ``J`` is different than the one in [CoelloCoello2002constraint]_
         # by a factor of 2 (sqrt(2) instead of sqrt(0.5))
         J = 2 * math.sqrt(0.5) * x1 * x2 * (x2.pow(2) / 12 + 0.25 * (x1 + x3).pow(2))
         t1 = P / (math.sqrt(2) * x1 * x2)

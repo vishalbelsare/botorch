@@ -13,8 +13,7 @@
 
 import os
 import sys
-
-from pkg_resources import get_distribution
+from importlib.metadata import version as get_version
 
 
 base_path = os.path.abspath(os.path.join(__file__, "..", "..", "..", "botorch"))
@@ -28,7 +27,7 @@ copyright = "2019, Meta Platforms, Inc."
 author = "Meta Platforms, Inc."
 
 # get version string
-version = get_distribution("botorch").version
+version = get_version("botorch")
 
 
 # -- General configuration ---------------------------------------------------
@@ -66,6 +65,11 @@ exclude_patterns = []
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = "sphinx"
 
+# The default role for single backticks (``text``). Setting to "literal" renders
+# them as inline code instead of attempting to create cross-references, which
+# avoids ambiguous reference warnings for common terms like ``batch_shape``.
+default_role = "literal"
+
 # Default options for autodoc directives. Applied to all autodoc directives
 autodoc_default_options = {
     "undoc-members": True,
@@ -75,7 +79,7 @@ autodoc_default_options = {
 # show type hints in the method description
 autodoc_typehints = "description"
 
-# Inlcude init docstrings into body of autoclass directives
+# Include init docstrings into body of autoclass directives
 autoclass_content = "both"
 
 
@@ -83,7 +87,7 @@ autoclass_content = "both"
 
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
-html_theme = "alabaster"
+html_theme = "sphinx_rtd_theme"
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
@@ -93,8 +97,9 @@ html_theme_options = {}
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-# html_static_path = ["_static"]
-html_static_path = []  # for now we have no static files to track
+html_static_path = ["_static"]
+
+html_css_files = ["custom.css"]
 
 # Custom sidebar templates, must be a dictionary that maps document names
 # to template names.
@@ -197,5 +202,5 @@ epub_exclude_files = ["search.html"]
 
 # -- Options for todo extension ----------------------------------------------
 
-# If true, `todo` and `todoList` produce output, else they produce nothing.
+# If true, ``todo`` and ``todoList`` produce output, else they produce nothing.
 todo_include_todos = True

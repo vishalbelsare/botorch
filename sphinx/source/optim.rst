@@ -41,6 +41,11 @@ Acquisition Function Optimization with Homotopy
 .. automodule:: botorch.optim.optimize_homotopy
     :members:
 
+Acquisition Function Optimization with Mixed Integer Variables
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: botorch.optim.optimize_mixed
+    :members:
+
 Closures
 -------------------------------------------
 
@@ -54,6 +59,11 @@ Model Fitting Closures
 .. automodule:: botorch.optim.closures.model_closures
     :members:
 
+Batched L-BFGS-B Scipy Port
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: botorch.optim.batched_lbfgs_b
+    :members:
 
 Utilities
 -------------------------------------------

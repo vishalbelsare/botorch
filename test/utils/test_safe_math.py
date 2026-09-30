@@ -7,11 +7,10 @@
 from __future__ import annotations
 
 import itertools
-
 import math
 from abc import abstractmethod
+from collections.abc import Callable
 from itertools import combinations, product
-from typing import Callable
 
 import torch
 from botorch.exceptions import UnsupportedError
@@ -33,6 +32,7 @@ from botorch.utils.safe_math import (
     logexpit,
     logmeanexp,
     logplusexp,
+    logsumexp,
     sigmoid,
     smooth_amax,
 )
@@ -44,13 +44,13 @@ INF = float("inf")
 
 
 def sum_constraint(samples: Tensor) -> Tensor:
-    """Represents the constraint `samples.sum(dim=-1) > 0`.
+    """Represents the constraint ``samples.sum(dim=-1) > 0``.
 
     Args:
-        samples: A `b x q x m`-dim Tensor.
+        samples: A ``b x q x m``-dim Tensor.
 
     Returns:
-        A `b x q`-dim Tensor representing constraint feasibility.
+        A ``b x q``-dim Tensor representing constraint feasibility.
     """
     return -samples.sum(dim=-1)
 
@@ -78,7 +78,7 @@ class UnaryOpTestMixin:
             _y.sum().backward()
             self.assertTrue(x.grad.equal(_x.grad))
 
-            # Test passing in pre-allocated `out`
+            # Test passing in pre-allocated ``out``
             with torch.no_grad():
                 y.zero_()
                 self.safe_op(x, out=y)
@@ -240,6 +240,21 @@ class TestSafeDiv(
                     self.assertEqual(a.grad, 1 / b)
                     self.assertEqual(b.grad, -a * b**-2)
 
+    def test_inf_div_finite(self):
+        """Test that div(inf, finite) returns inf, not 1."""
+        for dtype in (torch.float32, torch.float64):
+            for _a, _b in [(INF, 2.0), (-INF, 2.0), (INF, -2.0), (-INF, -2.0)]:
+                a = torch.tensor(
+                    _a, dtype=dtype, requires_grad=True, device=self.device
+                )
+                b = torch.tensor(
+                    _b, dtype=dtype, requires_grad=True, device=self.device
+                )
+                out = self.safe_op(a, b)
+                # inf / finite should return inf with the correct sign
+                expected = torch.tensor(_a / _b, dtype=dtype, device=self.device)
+                self.assertEqual(out, expected)
+
 
 class TestLogMeanExp(BotorchTestCase):
     def test_log_mean_exp(self):
@@ -269,8 +284,38 @@ class TestLogMeanExp(BotorchTestCase):
             )
 
 
+class TestEmptyReductionDims(BotorchTestCase):
+    def test_empty_reduction_dims(self):
+        # The maximum over an empty set is -inf. logsumexp and the fat maximum
+        # approximations follow torch.logsumexp for zero-size reduction dims
+        # instead of erroring, see
+        # https://github.com/meta-pytorch/botorch/issues/3335.
+        for dtype in (torch.float32, torch.float64):
+            X = torch.empty(3, 0, 2, dtype=dtype, device=self.device)
+            for fun, dim, keepdim in product(
+                (logsumexp, fatmax, smooth_amax), (1, (1, -1), (0, 1)), (True, False)
+            ):
+                with self.subTest(fun=fun, dim=dim, keepdim=keepdim):
+                    res = fun(X, dim=dim, keepdim=keepdim)
+                    self.assertEqual(res.shape, X.sum(dim=dim, keepdim=keepdim).shape)
+                    self.assertTrue(res.isneginf().all())
+
+            # exact agreement with torch.logsumexp
+            self.assertTrue(torch.equal(logsumexp(X, dim=1), torch.logsumexp(X, dim=1)))
+
+            # reducing a non-empty dim of an otherwise empty tensor is unaffected
+            self.assertEqual(logsumexp(X, dim=-1).shape, torch.Size([3, 0]))
+
+            # gradients remain defined
+            X = torch.empty(2, 0, dtype=dtype, device=self.device, requires_grad=True)
+            logsumexp(X, dim=-1).sum().backward()
+            self.assertEqual(X.grad.shape, X.shape)
+            self.assertTrue(torch.isfinite(X.grad).all())
+
+
 class TestSmoothNonLinearities(BotorchTestCase):
     def test_smooth_non_linearities(self):
+        torch.manual_seed(0)
         for dtype in (torch.float, torch.double):
             tkwargs = {"dtype": dtype, "device": self.device}
             n = 17
@@ -435,8 +480,26 @@ class TestSmoothNonLinearities(BotorchTestCase):
             tau = 1e-2
             self.assertAllClose(fatmaximum(x, y, tau=tau), x.maximum(y), atol=tau)
 
+            # testing fatmaximum with custom alpha
+            # Use a larger tau so that the difference between alpha values
+            # is detectable (with small tau, both approximate the true max
+            # so tightly that they become allclose).
+            tau_alpha = 1.0
+            alpha_default = fatmaximum(x, y, tau=tau_alpha)
+            alpha_custom = fatmaximum(x, y, tau=tau_alpha, alpha=5.0)
+            # different alpha should produce different results
+            self.assertFalse(torch.allclose(alpha_default, alpha_custom))
+            # but both should still approximate the true maximum
+            self.assertAllClose(alpha_custom, x.maximum(y), atol=tau_alpha)
+
             # testing fatminimum
             self.assertAllClose(fatminimum(x, y, tau=tau), x.minimum(y), atol=tau)
+
+            # testing fatminimum with custom alpha
+            alpha_default = fatminimum(x, y, tau=tau_alpha)
+            alpha_custom = fatminimum(x, y, tau=tau_alpha, alpha=5.0)
+            self.assertFalse(torch.allclose(alpha_default, alpha_custom))
+            self.assertAllClose(alpha_custom, x.minimum(y), atol=tau_alpha)
 
             # testing fatmoid
             X = torch.arange(-a, a, step=2 * a / n, requires_grad=True, **tkwargs)

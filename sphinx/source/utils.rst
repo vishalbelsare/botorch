@@ -32,6 +32,11 @@ Dispatcher
 .. automodule:: botorch.utils.dispatcher
 		:members:
 
+Evaluation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: botorch.utils.evaluation
+		:members:
+
 Low-Rank Cholesky Update Utils
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: botorch.utils.low_rank
@@ -55,11 +60,6 @@ Rounding
 Sampling
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: botorch.utils.sampling
-		:members:
-
-Sampling from GP priors
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-.. automodule:: botorch.utils.gp_sampling
 		:members:
 
 Testing
@@ -87,6 +87,11 @@ Feasible Volume
 .. automodule:: botorch.utils.feasible_volume
 		:members:
 
+JAX Utilities
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: botorch.utils.jax_utils
+		:members:
+
 Types and Type Hints
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: botorch.utils.types
@@ -100,6 +105,11 @@ Constants
 Safe Math
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: botorch.utils.safe_math
+		:members:
+
+LCBench Data Loader
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: botorch.utils.lcbench
 		:members:
 
 Multi-Objective Utilities
@@ -133,6 +143,11 @@ Hypervolume
 Non-dominated Partitionings
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: botorch.utils.multi_objective.box_decompositions.non_dominated
+		:members:
+
+Optimize
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: botorch.utils.multi_objective.optimize
 		:members:
 
 Pareto

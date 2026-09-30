@@ -8,6 +8,8 @@ import itertools
 import warnings
 
 import torch
+from botorch.acquisition.objective import ScalarizedPosteriorTransform
+from botorch.exceptions.warnings import UserInputWarning
 from botorch.fit import fit_gpytorch_mll
 from botorch.models.approximate_gp import (
     _SingleTaskVariationalGP,
@@ -21,8 +23,13 @@ from botorch.models.utils.inducing_point_allocators import (
     GreedyVarianceReduction,
 )
 from botorch.posteriors import GPyTorchPosterior, TransformedPosterior
+from botorch.posteriors.torch import TorchPosterior
 from botorch.utils.testing import BotorchTestCase
-from gpytorch.likelihoods import GaussianLikelihood, MultitaskGaussianLikelihood
+from gpytorch.likelihoods import (
+    BetaLikelihood,
+    GaussianLikelihood,
+    MultitaskGaussianLikelihood,
+)
 from gpytorch.mlls import VariationalELBO
 from gpytorch.variational import (
     IndependentMultitaskVariationalStrategy,
@@ -102,6 +109,16 @@ class TestSingleTaskVariationalGP(BotorchTestCase):
                 # test batch_shape property
                 self.assertEqual(model.batch_shape, tx.shape[:-2])
 
+        # Test that checks if posterior_transform is correctly applied
+        [tx1, ty1, test1] = all_tests["non_batched_mo"]
+        model1 = SingleTaskVariationalGP(tx1, ty1, inducing_points=tx1)
+        posterior_transform = ScalarizedPosteriorTransform(
+            weights=torch.tensor([1.0, 1.0], device=self.device)
+        )
+        posterior1 = model1.posterior(test1, posterior_transform=posterior_transform)
+        self.assertIsInstance(posterior1, GPyTorchPosterior)
+        self.assertEqual(posterior1.mean.shape[1], 1)
+
     def test_variational_setUp(self):
         for dtype in [torch.float, torch.double]:
             train_X = torch.rand(10, 1, device=self.device, dtype=dtype)
@@ -133,7 +150,7 @@ class TestSingleTaskVariationalGP(BotorchTestCase):
 
                 # but that the covariance does have a gradient
                 self.assertIsNotNone(
-                    batched_model.model.covar_module.raw_outputscale.grad
+                    batched_model.model.covar_module.raw_lengthscale.grad
                 )
 
                 # check that we always have three outputs
@@ -189,6 +206,26 @@ class TestSingleTaskVariationalGP(BotorchTestCase):
                 self.assertIsInstance(posterior, TransformedPosterior)
             else:
                 self.assertFalse(hasattr(model, "outcome_transform"))
+
+        # test user warnings when using transforms
+        with self.assertWarnsRegex(
+            UserInputWarning,
+            "Using an input transform with `SingleTaskVariationalGP`",
+        ):
+            SingleTaskVariationalGP(
+                train_X=train_X,
+                train_Y=train_Y,
+                input_transform=Normalize(d=1),
+            )
+        with self.assertWarnsRegex(
+            UserInputWarning,
+            "Using an outcome transform with `SingleTaskVariationalGP`",
+        ):
+            SingleTaskVariationalGP(
+                train_X=train_X,
+                train_Y=train_Y,
+                outcome_transform=Log(),
+            )
 
         # test default inducing point allocator
         self.assertIsInstance(model._inducing_point_allocator, GreedyVarianceReduction)
@@ -310,6 +347,32 @@ class TestSingleTaskVariationalGP(BotorchTestCase):
         self.assertAllClose(model_1_inducing, model_2_inducing)
         self.assertFalse(model_1_inducing[0, 0] == model_3_inducing[0, 0])
 
+    def test_non_gaussian_likelihood_posterior(self) -> None:
+        """Test that non-Gaussian likelihoods return TorchPosterior."""
+        train_X = torch.rand(10, 1, device=self.device)
+        model = SingleTaskVariationalGP(
+            train_X=train_X,
+            likelihood=BetaLikelihood(),
+        ).to(self.device)
+        test_X = torch.rand(5, 1, device=self.device)
+
+        # Without observation noise, the distribution is MVN (from the GP),
+        # so it should return GPyTorchPosterior.
+        posterior = model.posterior(test_X, observation_noise=False)
+        self.assertIsInstance(posterior, GPyTorchPosterior)
+
+        # With observation noise, the likelihood transforms the MVN into a
+        # Beta distribution, so it should return TorchPosterior.
+        posterior = model.posterior(test_X, observation_noise=True)
+        self.assertIsInstance(posterior, TorchPosterior)
+        self.assertNotIsInstance(posterior, GPyTorchPosterior)
+
+        # Verify that sampling works with the TorchPosterior and that the
+        # shape doesn't have a spurious trailing dim from GPyTorchPosterior.
+        # GPyTorchPosterior.rsample would unsqueeze(-1), adding an extra dim.
+        samples = posterior.rsample(sample_shape=torch.Size([2]))
+        self.assertEqual(samples.shape, torch.Size([2, 10, 5]))
+
     def test_input_transform(self) -> None:
         train_X = torch.linspace(1, 3, 10, dtype=torch.double)[:, None]
         y = -3 * train_X + 5
@@ -327,5 +390,5 @@ class TestSingleTaskVariationalGP(BotorchTestCase):
                     model.likelihood, model.model, num_data=train_X.shape[-2]
                 )
                 fit_gpytorch_mll(mll)
-                post = model.posterior(torch.tensor([train_X.mean()]))
+                post = model.posterior(torch.tensor([[train_X.mean()]]))
                 self.assertAllClose(post.mean[0][0], y.mean(), atol=1e-3, rtol=1e-3)

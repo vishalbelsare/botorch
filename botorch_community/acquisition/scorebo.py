@@ -21,19 +21,23 @@ Contributor: hvarfner
 from __future__ import annotations
 
 import warnings
-from typing import Optional
 
 import torch
 from botorch import settings
 from botorch.acquisition.acquisition import MCSamplerMixin
-from botorch.models.fully_bayesian import MCMC_DIM, SaasFullyBayesianSingleTaskGP
-from botorch.models.gp_regression import MIN_INFERRED_NOISE_LEVEL
-from botorch.models.utils import fantasize as fantasize_flag
-from botorch.utils.transforms import concatenate_pending_points, t_batch_mode_transform
-from botorch_community.acquisition.bayesian_active_learning import (
-    DISTANCE_METRICS,
+from botorch.acquisition.bayesian_active_learning import (
     FullyBayesianAcquisitionFunction,
 )
+from botorch.acquisition.objective import ScalarizedPosteriorTransform
+from botorch.models.fully_bayesian import MCMC_DIM, SaasFullyBayesianSingleTaskGP
+from botorch.models.utils import fantasize as fantasize_flag
+from botorch.models.utils.gpytorch_modules import MIN_INFERRED_NOISE_LEVEL
+from botorch.utils.transforms import (
+    average_over_ensemble_models,
+    concatenate_pending_points,
+    t_batch_mode_transform,
+)
+from botorch_community.acquisition.bayesian_active_learning import DISTANCE_METRICS
 from torch import Tensor
 
 # The lower bound on the CDF value of the max-values
@@ -47,10 +51,10 @@ class qSelfCorrectingBayesianOptimization(
         self,
         model: SaasFullyBayesianSingleTaskGP,
         optimal_outputs: Tensor,
-        optimal_inputs: Optional[Tensor] = None,
-        X_pending: Optional[Tensor] = None,
-        distance_metric: Optional[str] = "hellinger",
-        maximize: bool = True,
+        optimal_inputs: Tensor | None = None,
+        X_pending: Tensor | None = None,
+        distance_metric: str | None = "hellinger",
+        posterior_transform: ScalarizedPosteriorTransform | None = None,
     ) -> None:
         r"""Self-correcting Bayesian optimization [hvarfner2023scorebo]_ acquisition
         function. SCoreBO seeks to find accurate hyperparameters during the course
@@ -59,11 +63,11 @@ class qSelfCorrectingBayesianOptimization(
 
         Args:
             model: A fully bayesian model single-outcome model.
-            optimal_inputs: A `num_samples x num_models x d`-dim tensor containing
-                the sampled optimal inputs of dimension `d`.
-            optimal_outputs: A `num_samples x num_models x 1`-dim Tensor containing
+            optimal_inputs: A ``num_samples x num_models x d``-dim tensor containing
+                the sampled optimal inputs of dimension ``d``.
+            optimal_outputs: A ``num_samples x num_models x 1``-dim Tensor containing
                 the optimal objective values.
-            X_pending: A `batch_shape, m x d`-dim Tensor of `m` design points
+            X_pending: A ``batch_shape, m x d``-dim Tensor of ``m`` design points
             distance_metric: The distance metric used. Defaults to
                 "hellinger".
         """
@@ -71,14 +75,14 @@ class qSelfCorrectingBayesianOptimization(
         super().__init__(model=model)
         # To enable fully bayesian GP conditioning, we need to unsqueeze
         # to get num_optima x num_gps unique GPs
-        self.maximize = maximize
-        if not self.maximize:
-            optimal_outputs = -optimal_outputs
-
-        # inputs come as num_optima_per_model x num_models x d
-        # but we want it four-dimensional to condition one per model.
-
         self.optimal_outputs = optimal_outputs.unsqueeze(-2)
+        self.optimal_output_values = (
+            posterior_transform.evaluate(Y=self.optimal_outputs, X=None).unsqueeze(-1)
+            if posterior_transform
+            else self.optimal_outputs
+        )
+        self.posterior_transform = posterior_transform
+
         # JES-like version of SCoreBO if optimal inputs are provided
         if optimal_inputs is not None:
             with warnings.catch_warnings():
@@ -118,17 +122,24 @@ class qSelfCorrectingBayesianOptimization(
 
     @concatenate_pending_points
     @t_batch_mode_transform()
+    @average_over_ensemble_models
     def forward(self, X: Tensor) -> Tensor:
         # since we have two MC dims (over models and optima), we need to
-        # unsqueeze a second dim to accomodate the posterior pass
+        # unsqueeze a second dim to accommodate the posterior pass
         prev_posterior = self.model.posterior(
-            X.unsqueeze(MCMC_DIM), observation_noise=True
+            X.unsqueeze(MCMC_DIM),
+            observation_noise=True,
+            posterior_transform=self.posterior_transform,
         )
         noiseless_posterior = self.conditional_model.posterior(
-            X.unsqueeze(MCMC_DIM), observation_noise=False
+            X.unsqueeze(MCMC_DIM),
+            observation_noise=False,
+            posterior_transform=self.posterior_transform,
         )
         posterior = self.conditional_model.posterior(
-            X.unsqueeze(MCMC_DIM), observation_noise=True
+            X.unsqueeze(MCMC_DIM),
+            observation_noise=True,
+            posterior_transform=self.posterior_transform,
         )
 
         marg_mean = prev_posterior.mean.mean(dim=MCMC_DIM, keepdim=True)
@@ -139,7 +150,9 @@ class qSelfCorrectingBayesianOptimization(
         # the mixture variance is squeezed, need it unsqueezed
         marg_covar = prev_posterior.mixture_covariance_matrix.unsqueeze(MCMC_DIM)
         noiseless_var = noiseless_posterior.variance
-        normalized_mvs = (self.optimal_outputs - cond_means) / noiseless_var.sqrt()
+        normalized_mvs = (
+            self.optimal_output_values - cond_means
+        ) / noiseless_var.sqrt()
         cdf_mvs = self.normal.cdf(normalized_mvs).clamp_min(CLAMP_LB)
         pdf_mvs = torch.exp(self.normal.log_prob(normalized_mvs))
         mean_truncated = cond_means - noiseless_var.sqrt() * pdf_mvs / cdf_mvs

@@ -22,22 +22,22 @@ def is_non_dominated(
 
     Note: this assumes maximization.
 
-    For small `n`, this method uses a highly parallel methodology
+    For small ``n``, this method uses a highly parallel methodology
     that compares all pairs of points in Y. However, this is memory
-    intensive and slow for large `n`. For large `n` (or if Y is larger
+    intensive and slow for large ``n``. For large ``n`` (or if Y is larger
     than 5MB), this method will dispatch to a loop-based approach
     that is faster and has a lower memory footprint.
 
     Args:
-        Y: A `(batch_shape) x n x m`-dim tensor of outcomes.
-            If any element of `Y` is NaN, the corresponding point
+        Y: A ``(batch_shape) x n x m``-dim tensor of outcomes.
+            If any element of ``Y`` is NaN, the corresponding point
             will be treated as a dominated point (returning False).
         maximize: If True, assume maximization (default).
         deduplicate: A boolean indicating whether to only return
             unique points on the pareto frontier.
 
     Returns:
-        A `(batch_shape) x n`-dim boolean tensor indicating whether
+        A ``(batch_shape) x n``-dim boolean tensor indicating whether
         each point is non-dominated.
     """
     n = Y.shape[-2]
@@ -47,13 +47,14 @@ def is_non_dominated(
     if n > 1000 or n**2 * Y.shape[:-2].numel() * el_size / 8 > MAX_BYTES:
         return _is_non_dominated_loop(Y, maximize=maximize, deduplicate=deduplicate)
 
+    is_all_nan = Y.isnan().all(dim=-1)  # edge case: all elements are NaN
     Y1 = Y.unsqueeze(-3)
     Y2 = Y.unsqueeze(-2)
     if maximize:
         dominates = (Y1 >= Y2).all(dim=-1) & (Y1 > Y2).any(dim=-1)
     else:
         dominates = (Y1 <= Y2).all(dim=-1) & (Y1 < Y2).any(dim=-1)
-    nd_mask = ~(dominates.any(dim=-1))
+    nd_mask = ~(dominates.any(dim=-1)) & ~is_all_nan
     if deduplicate:
         # remove duplicates
         # find index of first occurrence  of each unique element
@@ -71,18 +72,18 @@ def _is_non_dominated_loop(
 ) -> Tensor:
     r"""Determine which points are non-dominated.
 
-    Compared to `is_non_dominated`, this method is significantly
-    faster for large `n` on a CPU and will significant reduce memory
-    overhead. However, `is_non_dominated` is faster for smaller problems.
+    Compared to ``is_non_dominated``, this method is significantly
+    faster for large ``n`` on a CPU and will significant reduce memory
+    overhead. However, ``is_non_dominated`` is faster for smaller problems.
 
     Args:
-        Y: A `(batch_shape) x n x m` Tensor of outcomes.
+        Y: A ``(batch_shape) x n x m`` Tensor of outcomes.
         maximize: If True, assume maximization (default).
         deduplicate: A boolean indicating whether to only return unique points on
             the pareto frontier.
 
     Returns:
-        A `(batch_shape) x n`-dim Tensor of booleans indicating whether each point is
+        A ``(batch_shape) x n``-dim Tensor of booleans indicating whether each point is
             non-dominated.
     """
     is_efficient = torch.ones(*Y.shape[:-1], dtype=bool, device=Y.device)
@@ -110,7 +111,7 @@ def _is_non_dominated_loop(
     if not deduplicate:
         # Doing another pass over the data to remove duplicates. There may be a
         # more efficient way to do this. One could broadcast this as in
-        # `is_non_dominated`, but we loop here to avoid high memory usage.
+        # ``is_non_dominated``, but we loop here to avoid high memory usage.
         is_efficient_dedup = is_efficient.clone()
         for i in range(Y.shape[-2]):
             i_is_efficient = is_efficient[..., i]

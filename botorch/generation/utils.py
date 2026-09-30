@@ -6,12 +6,10 @@
 
 from __future__ import annotations
 
-import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
-
 from botorch.acquisition import AcquisitionFunction, FixedFeatureAcquisitionFunction
 from botorch.optim.parameter_constraints import (
     _generate_unfixed_lin_constraints,
@@ -20,41 +18,13 @@ from botorch.optim.parameter_constraints import (
 from torch import Tensor
 
 
-def _convert_nonlinear_inequality_constraints(
-    nonlinear_inequality_constraints: List[Union[Callable, Tuple[Callable, bool]]]
-) -> List[Tuple[Callable, bool]]:
-    """Convert legacy defintions of nonlinear inequality constraints into the new
-    format. Assumes intra-point constraints.
-    """
-    nlcs = []
-    legacy = False
-    # return nonlinear_inequality_constraints
-    for nlc in nonlinear_inequality_constraints:
-        if callable(nlc):
-            # old style --> convert
-            nlcs.append((nlc, True))
-            legacy = True
-        else:
-            nlcs.append(nlc)
-    if legacy:
-        warnings.warn(
-            "The `nonlinear_inequality_constraints` argument is expected "
-            "take a list of tuples. Passing a list of callables "
-            "will result in an error in future versions.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-
-    return nlcs
-
-
 def _flip_sub_unique(x: Tensor, k: int) -> Tensor:
     """Get the first k unique elements of a single-dimensional tensor, traversing the
     tensor from the back.
 
     Args:
         x: A single-dimensional tensor
-        k: the number of elements to return
+        k: The number of elements to return.
 
     Returns:
         A tensor with min(k, |x|) elements.
@@ -82,7 +52,7 @@ def _flip_sub_unique(x: Tensor, k: int) -> Tensor:
     return x[idcs[: len(out)]]
 
 
-@dataclass(frozen=True, repr=False, eq=False)
+@dataclass(frozen=True, repr=False, eq=False, slots=True)
 class _NoFixedFeatures:
     """
     Dataclass to store the objects after removing fixed features.
@@ -92,67 +62,73 @@ class _NoFixedFeatures:
 
     acquisition_function: FixedFeatureAcquisitionFunction
     initial_conditions: Tensor
-    lower_bounds: Optional[Union[float, Tensor]]
-    upper_bounds: Optional[Union[float, Tensor]]
-    inequality_constraints: Optional[List[Tuple[Tensor, Tensor, float]]]
-    equality_constraints: Optional[List[Tuple[Tensor, Tensor, float]]]
-    nonlinear_inequality_constraints: Optional[List[Callable[[Tensor], Tensor]]]
+    lower_bounds: float | Tensor | None
+    upper_bounds: float | Tensor | None
+    inequality_constraints: list[tuple[Tensor, Tensor, float]] | None
+    equality_constraints: list[tuple[Tensor, Tensor, float]] | None
+    nonlinear_inequality_constraints: list[Callable[[Tensor], Tensor]] | None
 
 
 def _remove_fixed_features_from_optimization(
-    fixed_features: Dict[int, Optional[float]],
+    fixed_features: dict[int, float | None],
     acquisition_function: AcquisitionFunction,
-    initial_conditions: Tensor,
-    lower_bounds: Optional[Union[float, Tensor]],
-    upper_bounds: Optional[Union[float, Tensor]],
-    inequality_constraints: Optional[List[Tuple[Tensor, Tensor, float]]],
-    equality_constraints: Optional[List[Tuple[Tensor, Tensor, float]]],
-    nonlinear_inequality_constraints: Optional[List[Callable[[Tensor], Tensor]]],
+    initial_conditions: Tensor | None,
+    d: int,
+    lower_bounds: float | Tensor | None,
+    upper_bounds: float | Tensor | None,
+    inequality_constraints: list[tuple[Tensor, Tensor, float]] | None,
+    equality_constraints: list[tuple[Tensor, Tensor, float]] | None,
+    nonlinear_inequality_constraints: list[Callable[[Tensor], Tensor]] | None,
 ) -> _NoFixedFeatures:
     """
     Given a set of non-empty fixed features, this function effectively reduces the
     dimensionality of the domain that the acquisition function is being optimized
     over by removing the set of fixed features. Consequently, this function returns a
-    new `FixedFeatureAcquisitionFunction`, new constraints, and bounds defined over
+    new ``FixedFeatureAcquisitionFunction``, new constraints, and bounds defined over
     unfixed features.
 
     Args:
         fixed_features: This is a dictionary of feature indices to values, where
             all generated candidates will have features fixed to these values.
-            If the dictionary value is None, then that feature will just be
-            fixed to the clamped value and not optimized. Assumes values to be
-            compatible with lower_bounds and upper_bounds!
+            Assumes values to be compatible with lower_bounds and upper_bounds!
         acquisition_function: Acquisition function over the original domain being
             maximized.
         initial_conditions: Starting points for optimization w.r.t. the complete domain.
+        d: Dimensionality of the original domain.
         lower_bounds: Minimum values for each column of initial_conditions.
-        upper_bounds: Minimum values for each column of initial_conditions.
-        inequality constraints: A list of tuples (indices, coefficients, rhs),
+        upper_bounds: Maximum values for each column of initial_conditions.
+        inequality_constraints: A list of tuples (indices, coefficients, rhs),
             with each tuple encoding an inequality constraint of the form
-            `sum_i (X[indices[i]] * coefficients[i]) >= rhs`.
-        equality constraints: A list of tuples (indices, coefficients, rhs),
+            ``sum_i (X[indices[i]] * coefficients[i]) >= rhs``.
+        equality_constraints: A list of tuples (indices, coefficients, rhs),
             with each tuple encoding an inequality constraint of the form
-            `sum_i (X[indices[i]] * coefficients[i]) = rhs`.
-        nonlinear_inequality_constraints: A list of callables with that represent
-            non-linear inequality constraints of the form `callable(x) >= 0`. Each
-            callable is expected to take a `(num_restarts) x q x d`-dim tensor as
-            an input and return a `(num_restarts) x q`-dim tensor with the
+            ``sum_i (X[indices[i]] * coefficients[i]) = rhs``.
+        nonlinear_inequality_constraints: A list of callables that represent
+            non-linear inequality constraints of the form ``callable(x) >= 0``. Each
+            callable is expected to take a ``(num_restarts) x q x d``-dim tensor as
+            an input and return a ``(num_restarts) x q``-dim tensor with the
             constraint values.
 
     Returns:
         _NoFixedFeatures dataclass object.
     """
+    if not fixed_features:
+        return _NoFixedFeatures(
+            acquisition_function=acquisition_function,
+            initial_conditions=initial_conditions,
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
+            inequality_constraints=inequality_constraints,
+            equality_constraints=equality_constraints,
+            nonlinear_inequality_constraints=nonlinear_inequality_constraints,
+        )
     # sort the keys for consistency
     sorted_keys = sorted(fixed_features)
     sorted_values = []
     for key in sorted_keys:
-        if fixed_features[key] is None:
-            val = initial_conditions[..., [key]]
-        else:
-            val = fixed_features[key]
+        val = fixed_features[key]
         sorted_values.append(val)
 
-    d = initial_conditions.shape[-1]
     acquisition_function = FixedFeatureAcquisitionFunction(
         acq_function=acquisition_function,
         d=d,
@@ -162,7 +138,8 @@ def _remove_fixed_features_from_optimization(
 
     # extract initial_conditions, bounds at unfixed indices
     unfixed_indices = sorted(set(range(d)) - set(sorted_keys))
-    initial_conditions = initial_conditions[..., unfixed_indices]
+    if initial_conditions is not None:
+        initial_conditions = initial_conditions[..., unfixed_indices]
     if isinstance(lower_bounds, Tensor):
         lower_bounds = lower_bounds[..., unfixed_indices]
     if isinstance(upper_bounds, Tensor):

@@ -25,22 +25,21 @@ from __future__ import annotations
 import warnings
 from math import log, pi
 
-from typing import Optional
-
 import torch
 from botorch import settings
 from botorch.acquisition.acquisition import AcquisitionFunction, MCSamplerMixin
 from botorch.acquisition.objective import PosteriorTransform
-
-from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
-from botorch.models.gp_regression import MIN_INFERRED_NOISE_LEVEL
+from botorch.models.fully_bayesian import FullyBayesianSingleTaskGP
 from botorch.models.model import Model
-
 from botorch.models.utils import check_no_nans, fantasize as fantasize_flag
+from botorch.models.utils.gpytorch_modules import MIN_INFERRED_NOISE_LEVEL
 from botorch.sampling.normal import SobolQMCNormalSampler
-from botorch.utils.transforms import concatenate_pending_points, t_batch_mode_transform
+from botorch.utils.transforms import (
+    average_over_ensemble_models,
+    concatenate_pending_points,
+    t_batch_mode_transform,
+)
 from torch import Tensor
-
 from torch.distributions import Normal
 
 MCMC_DIM = -3  # Only relevant if you do Fully Bayesian GPs.
@@ -53,16 +52,16 @@ CLAMP_LB = torch.finfo(torch.float32).eps
 FULLY_BAYESIAN_ERROR_MSG = (
     "JES is not yet available with Fully Bayesian GPs. Track the issue, "
     "which regards conditioning on a number of optima on a collection "
-    "of models, in detail at https://github.com/pytorch/botorch/issues/1680"
+    "of models, in detail at https://github.com/meta-pytorch/botorch/issues/1680"
 )
 
 
 class qJointEntropySearch(AcquisitionFunction, MCSamplerMixin):
     r"""The acquisition function for the Joint Entropy Search, where the batches
-    `q > 1` are supported through the lower bound formulation.
+    ``q > 1`` are supported through the lower bound formulation.
 
     This acquisition function computes the mutual information between the observation
-    at a candidate point `X` and the optimal input-output pair.
+    at a candidate point ``X`` and the optimal input-output pair.
 
     See [Tu2022joint]_ for a discussion on the estimation procedure.
     """
@@ -73,32 +72,31 @@ class qJointEntropySearch(AcquisitionFunction, MCSamplerMixin):
         optimal_inputs: Tensor,
         optimal_outputs: Tensor,
         condition_noiseless: bool = True,
-        posterior_transform: Optional[PosteriorTransform] = None,
-        X_pending: Optional[Tensor] = None,
+        posterior_transform: PosteriorTransform | None = None,
+        X_pending: Tensor | None = None,
         estimation_type: str = "LB",
-        maximize: bool = True,
         num_samples: int = 64,
     ) -> None:
         r"""Joint entropy search acquisition function.
 
         Args:
             model: A fitted single-outcome model.
-            optimal_inputs: A `num_samples x d`-dim tensor containing the sampled
-                optimal inputs of dimension `d`. We assume for simplicity that each
+            optimal_inputs: A ``num_samples x d``-dim tensor containing the sampled
+                optimal inputs of dimension ``d``. We assume for simplicity that each
                 sample only contains one optimal set of inputs.
-            optimal_outputs: A `num_samples x 1`-dim Tensor containing the optimal
-                set of objectives of dimension `1`.
+            optimal_outputs: A ``num_samples x 1``-dim Tensor containing the optimal
+                set of objectives of dimension ``1``.
             condition_noiseless: Whether to condition on noiseless optimal observations
-                `f*` [Hvarfner2022joint]_ or noisy optimal observations `y*`
+                ``f*`` [Hvarfner2022joint]_ or noisy optimal observations ``y*``
                 [Tu2022joint]_. These are sampled identically, so this only controls
                 the fashion in which the GP is reshaped as a result of conditioning
                 on the optimum.
+            posterior_transform: PosteriorTransform to negate or scalarize the output.
             estimation_type: estimation_type: A string to determine which entropy
                 estimate is computed: Lower bound" ("LB") or "Monte Carlo" ("MC").
                 Lower Bound is recommended due to the relatively high variance
                 of the MC estimator.
-            maximize: If true, we consider a maximization problem.
-            X_pending: A `m x d`-dim Tensor of `m` design points that have been
+            X_pending: A ``m x d``-dim Tensor of ``m`` design points that have been
                 submitted for function evaluation, but have not yet been evaluated.
             num_samples: The number of Monte Carlo samples used for the Monte Carlo
                 estimate.
@@ -114,16 +112,15 @@ class qJointEntropySearch(AcquisitionFunction, MCSamplerMixin):
         # and three-dimensional otherwise.
         self.optimal_inputs = optimal_inputs.unsqueeze(-2)
         self.optimal_outputs = optimal_outputs.unsqueeze(-2)
+        self.optimal_output_values = (
+            posterior_transform.evaluate(
+                Y=self.optimal_outputs, X=self.optimal_inputs
+            ).unsqueeze(-1)
+            if posterior_transform
+            else self.optimal_outputs
+        )
         self.posterior_transform = posterior_transform
-        self.maximize = maximize
 
-        # The optima (can be maxima, can be minima) come in as the largest
-        # values if we optimize, or the smallest (likely substantially negative)
-        # if we minimize. Inside the acquisition function, however, we always
-        # want to consider MAX-values. As such, we need to flip them if
-        # we want to minimize.
-        if not self.maximize:
-            optimal_outputs = -optimal_outputs
         self.num_samples = optimal_inputs.shape[0]
         self.condition_noiseless = condition_noiseless
         self.initial_model = model
@@ -132,7 +129,7 @@ class qJointEntropySearch(AcquisitionFunction, MCSamplerMixin):
         # and the optimal outputs have shapes num_optima x [num_models if FB] x 1 x 1
         # The third dimension equaling 1 is required to get one optimum per model,
         # which raises a BotorchTensorDimensionWarning.
-        if isinstance(model, SaasFullyBayesianSingleTaskGP):
+        if isinstance(model, FullyBayesianSingleTaskGP):
             raise NotImplementedError(FULLY_BAYESIAN_ERROR_MSG)
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore")
@@ -170,16 +167,17 @@ class qJointEntropySearch(AcquisitionFunction, MCSamplerMixin):
 
     @concatenate_pending_points
     @t_batch_mode_transform()
+    @average_over_ensemble_models
     def forward(self, X: Tensor) -> Tensor:
-        r"""Evaluates qJointEntropySearch at the design points `X`.
+        r"""Evaluates qJointEntropySearch at the design points ``X``.
 
         Args:
-            X: A `batch_shape x q x d`-dim Tensor of `batch_shape` t-batches with `q`
-            `d`-dim design points each.
+            X: A ``batch_shape x q x d``-dim Tensor of ``batch_shape``
+                t-batches with ``q`` ``d``-dim design points each.
 
         Returns:
-            A `batch_shape`-dim Tensor of acquisition values at the given design
-            points `X`.
+            A ``batch_shape``-dim Tensor of acquisition values at the given design
+            points ``X``.
         """
         if self.estimation_type == "LB":
             res = self._compute_lower_bound_information_gain(X)
@@ -195,17 +193,19 @@ class qJointEntropySearch(AcquisitionFunction, MCSamplerMixin):
     def _compute_lower_bound_information_gain(
         self, X: Tensor, return_parts: bool = False
     ) -> Tensor:
-        r"""Evaluates the lower bound information gain at the design points `X`.
+        r"""Evaluates the lower bound information gain at the design points ``X``.
 
         Args:
-            X: A `batch_shape x q x d`-dim Tensor of `batch_shape` t-batches with `q`
-            `d`-dim design points each.
+            X: A ``batch_shape x q x d``-dim Tensor of ``batch_shape``
+                t-batches with ``q`` ``d``-dim design points each.
 
         Returns:
-            A `batch_shape`-dim Tensor of acquisition values at the given design
-            points `X`.
+            A ``batch_shape``-dim Tensor of acquisition values at the given design
+            points ``X``.
         """
-        initial_posterior = self.initial_model.posterior(X, observation_noise=True)
+        initial_posterior = self.initial_model.posterior(
+            X, observation_noise=True, posterior_transform=self.posterior_transform
+        )
         # need to check if there is a two-dimensional batch shape -
         # the sampled optima appear in the dimension right after
         batch_shape = X.shape[:-2]
@@ -223,15 +223,17 @@ class qJointEntropySearch(AcquisitionFunction, MCSamplerMixin):
 
         # Compute the mixture mean and variance
         posterior_m = self.conditional_model.posterior(
-            X.unsqueeze(MCMC_DIM), observation_noise=True
+            X.unsqueeze(MCMC_DIM),
+            observation_noise=True,
+            posterior_transform=self.posterior_transform,
         )
         noiseless_var = self.conditional_model.posterior(
-            X.unsqueeze(MCMC_DIM), observation_noise=False
+            X.unsqueeze(MCMC_DIM),
+            observation_noise=False,
+            posterior_transform=self.posterior_transform,
         ).variance
 
         mean_m = posterior_m.mean
-        if not self.maximize:
-            mean_m = -mean_m
         variance_m = posterior_m.variance
 
         check_no_nans(variance_m)
@@ -242,7 +244,7 @@ class qJointEntropySearch(AcquisitionFunction, MCSamplerMixin):
             torch.zeros(1, device=X.device, dtype=X.dtype),
             torch.ones(1, device=X.device, dtype=X.dtype),
         )
-        normalized_mvs = (self.optimal_outputs - mean_m) / stdv
+        normalized_mvs = (self.optimal_output_values - mean_m) / stdv
         cdf_mvs = normal.cdf(normalized_mvs).clamp_min(CLAMP_LB)
         pdf_mvs = torch.exp(normal.log_prob(normalized_mvs))
 
@@ -286,17 +288,19 @@ class qJointEntropySearch(AcquisitionFunction, MCSamplerMixin):
     def _compute_monte_carlo_information_gain(
         self, X: Tensor, return_parts: bool = False
     ) -> Tensor:
-        r"""Evaluates the lower bound information gain at the design points `X`.
+        r"""Evaluates the lower bound information gain at the design points ``X``.
 
         Args:
-            X: A `batch_shape x q x d`-dim Tensor of `batch_shape` t-batches with `q`
-            `d`-dim design points each.
+            X: A ``batch_shape x q x d``-dim Tensor of ``batch_shape``
+                t-batches with ``q`` ``d``-dim design points each.
 
         Returns:
-            A `batch_shape`-dim Tensor of acquisition values at the given design
-            points `X`.
+            A ``batch_shape``-dim Tensor of acquisition values at the given design
+            points ``X``.
         """
-        initial_posterior = self.initial_model.posterior(X, observation_noise=True)
+        initial_posterior = self.initial_model.posterior(
+            X, observation_noise=True, posterior_transform=self.posterior_transform
+        )
 
         batch_shape = X.shape[:-2]
         sample_dim = len(batch_shape)
@@ -313,15 +317,17 @@ class qJointEntropySearch(AcquisitionFunction, MCSamplerMixin):
 
         # Compute the mixture mean and variance
         posterior_m = self.conditional_model.posterior(
-            X.unsqueeze(MCMC_DIM), observation_noise=True
+            X.unsqueeze(MCMC_DIM),
+            observation_noise=True,
+            posterior_transform=self.posterior_transform,
         )
         noiseless_var = self.conditional_model.posterior(
-            X.unsqueeze(MCMC_DIM), observation_noise=False
+            X.unsqueeze(MCMC_DIM),
+            observation_noise=False,
+            posterior_transform=self.posterior_transform,
         ).variance
 
         mean_m = posterior_m.mean
-        if not self.maximize:
-            mean_m = -mean_m
         variance_m = posterior_m.variance.clamp_min(CLAMP_LB)
         conditional_samples, conditional_logprobs = self._compute_monte_carlo_variables(
             posterior_m

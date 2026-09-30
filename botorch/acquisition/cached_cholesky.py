@@ -8,10 +8,10 @@ r"""
 Abstract class for acquisition functions leveraging a cached Cholesky
 decomposition of the posterior covariance over f(X_baseline).
 """
+
 from __future__ import annotations
 
 import warnings
-from typing import Optional
 
 import torch
 from botorch.acquisition.acquisition import MCSamplerMixin
@@ -20,7 +20,6 @@ from botorch.models.gpytorch import GPyTorchModel
 from botorch.models.higher_order_gp import HigherOrderGP
 from botorch.models.model import Model
 from botorch.models.model_list_gp_regression import ModelListGP
-from botorch.models.multitask import KroneckerMultiTaskGP, MultiTaskGP
 from botorch.posteriors.gpytorch import GPyTorchPosterior
 from botorch.posteriors.posterior import Posterior
 from botorch.sampling.base import MCSampler
@@ -39,10 +38,11 @@ def supports_cache_root(model: Model) -> bool:
     """
     if isinstance(model, ModelListGP):
         return all(supports_cache_root(m) for m in model.models)
+    # Allow models to explicitly opt out of cache_root support.
+    if getattr(model, "_supports_cache_root", True) is False:
+        return False
     # Multi task models and non-GPyTorch models are not supported.
-    if isinstance(
-        model, (MultiTaskGP, KroneckerMultiTaskGP, HigherOrderGP)
-    ) or not isinstance(model, GPyTorchModel):
+    if not isinstance(model, GPyTorchModel):
         return False
     # Models that return a TransformedPosterior are not supported.
     if hasattr(model, "outcome_transform") and (not model.outcome_transform._is_linear):
@@ -66,29 +66,31 @@ class CachedCholeskyMCSamplerMixin(MCSamplerMixin):
     Specifically, this is for acquisition functions that require sampling from
     the posterior P(f(X_baseline, X) | D). The Cholesky of the posterior
     covariance over f(X_baseline) is cached.
-
-    :meta private:
     """
 
     def __init__(
         self,
         model: Model,
-        cache_root: bool = False,
-        sampler: Optional[MCSampler] = None,
+        cache_root: bool | None = None,
+        sampler: MCSampler | None = None,
     ) -> None:
         r"""Set class attributes and perform compatibility checks.
 
         Args:
             model: A model.
             cache_root: A boolean indicating whether to cache the Cholesky.
-                This might be overridden in the model is not compatible.
+                If None, will be set to True if the model supports it and False
+                otherwise.
             sampler: An optional MCSampler object.
         """
         MCSamplerMixin.__init__(self, sampler=sampler)
-        if cache_root and not supports_cache_root(model):
+        if cache_root is None:
+            cache_root = supports_cache_root(model)
+        elif cache_root and not supports_cache_root(model):
             warnings.warn(
                 _get_cache_root_not_supported_message(type(model)),
                 RuntimeWarning,
+                stacklevel=3,
             )
             cache_root = False
         self._cache_root = cache_root
@@ -99,17 +101,17 @@ class CachedCholeskyMCSamplerMixin(MCSamplerMixin):
     ) -> Tensor:
         r"""Cache Cholesky of the posterior covariance over f(X_baseline).
 
-        Because `LinearOperator.root_decomposition` is decorated with LinearOperator's
+        Because ``LinearOperator.root_decomposition`` is decorated with LinearOperator's
         @cached decorator, this function is doing a lot implicitly:
 
-        1) Check if a root decomposition has already been cached to `lazy_covar`.
-          Note that it will not have been if `posterior.mvn` is a
-          `MultitaskMultivariateNormal`, since we construct `lazy_covar` in that
+        1) Check if a root decomposition has already been cached to ``lazy_covar``.
+          Note that it will not have been if ``posterior.mvn`` is a
+          ``MultitaskMultivariateNormal``, since we construct ``lazy_covar`` in that
           case.
         2) If the root decomposition has not been found in the cache, compute it.
-        3) Write it to the cache of `lazy_covar`. Note that this will become
-          inaccessible if `posterior.mvn` is a `MultitaskMultivariateNormal`,
-          since in that case `lazy_covar`'s scope is only this function.
+        3) Write it to the cache of ``lazy_covar``. Note that this will become
+          inaccessible if ``posterior.mvn`` is a ``MultitaskMultivariateNormal``,
+          since in that case ``lazy_covar``'s scope is only this function.
 
         Args:
             posterior: The posterior over f(X_baseline).
@@ -122,15 +124,15 @@ class CachedCholeskyMCSamplerMixin(MCSamplerMixin):
         return lazy_covar_root.root.to_dense()
 
     def _get_f_X_samples(self, posterior: GPyTorchPosterior, q_in: int) -> Tensor:
-        r"""Get posterior samples at the `q_in` new points from the joint posterior.
+        r"""Get posterior samples at the ``q_in`` new points from the joint posterior.
 
         Args:
             posterior: The joint posterior is over (X_baseline, X).
-            q_in: The number of new points in the posterior. See `_set_sampler` for
+            q_in: The number of new points in the posterior. See ``_set_sampler`` for
                 more information.
 
         Returns:
-            A `sample_shape x batch_shape x q x m`-dim tensor of posterior
+            A ``sample_shape x batch_shape x q x m``-dim tensor of posterior
                 samples at the new points.
         """
         # Technically we should make sure that we add a consistent nugget to the
@@ -152,6 +154,7 @@ class CachedCholeskyMCSamplerMixin(MCSamplerMixin):
                     "ill-conditioned covariance matrix. "
                     "Falling back to standard sampling.",
                     BotorchWarning,
+                    stacklevel=3,
                 )
 
         # TODO: improve efficiency for multi-task models
@@ -175,10 +178,11 @@ class CachedCholeskyMCSamplerMixin(MCSamplerMixin):
 
         Args:
             q_in: The effective input batch size. This is typically equal to the
-                q-batch size of `X`. However, if using a one-to-many input transform,
-                e.g., `InputPerturbation` with `n_w` perturbations, the posterior will
-                have `n_w` points on the q-batch for each point on the q-batch of `X`.
-                In which case, `q_in = q * n_w` is used.
+                q-batch size of ``X``. However, if using a one-to-many input
+                transform, e.g., ``InputPerturbation`` with ``n_w`` perturbations,
+                the posterior will have ``n_w`` points on the q-batch for each
+                point on the q-batch of ``X``. In which case, ``q_in = q * n_w``
+                is used.
             posterior: The posterior.
         """
         if self.q_in != q_in and self.base_sampler is not None:
@@ -186,28 +190,3 @@ class CachedCholeskyMCSamplerMixin(MCSamplerMixin):
                 posterior=posterior, base_sampler=self.base_sampler
             )
             self.q_in = q_in
-
-
-# TODO: remove
-class CachedCholeskyMCAcquisitionFunction(CachedCholeskyMCSamplerMixin):
-    r"""DEPRECATED - USE CachedCholeskyMCSamplerMixin instead."""
-
-    def _setup(
-        self,
-        model: Model,
-        cache_root: bool = False,
-    ) -> None:
-        r"""Set class attributes and perform compatibility checks.
-
-        Args:
-            model: A model.
-            cache_root: A boolean indicating whether to cache the Cholesky.
-                This might be overridden in the model is not compatible.
-        """
-        warnings.warn(
-            "`CachedCholeskyMCAcquisitionFunction` is deprecated. Please switch to "
-            "`CachedCholeskyMCSamplerMixin` and replace any calls to _setup with the "
-            "constructor of the Mixin class.",
-            DeprecationWarning,
-        )
-        super().__init__(model=model, cache_root=cache_root, sampler=self.sampler)

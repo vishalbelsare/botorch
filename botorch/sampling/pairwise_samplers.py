@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from itertools import combinations
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -81,13 +81,13 @@ class PairwiseIIDNormalSampler(PairwiseMCSampler, IIDNormalSampler):
     def __init__(
         self,
         sample_shape: torch.Size,
-        seed: Optional[int] = None,
+        seed: int | None = None,
         max_num_comparisons: int = None,
         **kwargs: Any,
     ) -> None:
         r"""
         Args:
-            sample_shape: The `sample_shape` of the samples to generate.
+            sample_shape: The ``sample_shape`` of the samples to generate.
             seed: The seed for the RNG. If omitted, use a random seed.
             max_num_comparisons:  Max number of comparisons drawn within samples.
                 If None, use all possible pairwise comparisons.
@@ -103,13 +103,13 @@ class PairwiseSobolQMCNormalSampler(PairwiseMCSampler, SobolQMCNormalSampler):
     def __init__(
         self,
         sample_shape: torch.Size,
-        seed: Optional[int] = None,
+        seed: int | None = None,
         max_num_comparisons: int = None,
         **kwargs: Any,
     ) -> None:
         r"""
         Args:
-            sample_shape: The `sample_shape` of the samples to generate.
+            sample_shape: The ``sample_shape`` of the samples to generate.
             seed: The seed for the RNG. If omitted, use a random seed.
             max_num_comparisons:  Max number of comparisons drawn within samples.
                 If None, use all possible pairwise comparisons.

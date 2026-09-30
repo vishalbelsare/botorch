@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Iterable, List, Optional, overload, Tuple, Union
+from collections.abc import Callable, Iterable
+from typing import Any, overload
 
 import torch
 from botorch.models.approximate_gp import SingleTaskVariationalGP
@@ -21,8 +22,8 @@ from gpytorch.kernels.kernel import Kernel
 from torch import LongTensor, Tensor
 from torch.nn import Module, ModuleList
 
-TInputTransform = Union[InputTransform, Callable[[Tensor], Tensor]]
-TOutputTransform = Union[OutcomeTransform, Callable[[Tensor], Tensor]]
+TInputTransform = InputTransform | Callable[[Tensor], Tensor]
+TOutputTransform = OutcomeTransform | Callable[[Tensor], Tensor]
 GetTrainInputs = Dispatcher("get_train_inputs")
 GetTrainTargets = Dispatcher("get_train_targets")
 
@@ -30,8 +31,8 @@ GetTrainTargets = Dispatcher("get_train_targets")
 class TransformedModuleMixin:
     r"""Mixin that wraps a module's __call__ method with optional transforms."""
 
-    input_transform: Optional[TInputTransform]
-    output_transform: Optional[TOutputTransform]
+    input_transform: TInputTransform | None
+    output_transform: TOutputTransform | None
 
     def __call__(self, values: Tensor, *args: Any, **kwargs: Any) -> Tensor:
         input_transform = getattr(self, "input_transform", None)
@@ -83,7 +84,7 @@ class ChainedTransform(TensorTransform):
 class SineCosineTransform(TensorTransform):
     r"""A transform that returns concatenated sine and cosine features."""
 
-    def __init__(self, scale: Optional[Tensor] = None):
+    def __init__(self, scale: Tensor | None = None):
         r"""Initializes a SineCosineTransform instance.
 
         Args:
@@ -124,7 +125,7 @@ class OutputscaleTransform(TensorTransform):
         r"""Initializes an OutputscaleTransform instance.
 
         Args:
-            kernel: A ScaleKernel whose `outputscale` is to be used.
+            kernel: A ScaleKernel whose ``outputscale`` is to be used.
         """
         super().__init__()
         self.kernel = kernel
@@ -142,7 +143,7 @@ class FeatureSelector(TensorTransform):
     r"""A transform that returns a subset of its input's features.
     along a given tensor dimension."""
 
-    def __init__(self, indices: Iterable[int], dim: Union[int, LongTensor] = -1):
+    def __init__(self, indices: Iterable[int], dim: int | LongTensor = -1):
         r"""Initializes a FeatureSelector instance.
 
         Args:
@@ -160,12 +161,12 @@ class FeatureSelector(TensorTransform):
 
 
 class OutcomeUntransformer(TensorTransform):
-    r"""Module acting as a bridge for `OutcomeTransform.untransform`."""
+    r"""Module acting as a bridge for ``OutcomeTransform.untransform``."""
 
     def __init__(
         self,
         transform: OutcomeTransform,
-        num_outputs: Union[int, LongTensor],
+        num_outputs: int | LongTensor,
     ):
         r"""Initializes an OutcomeUntransformer instance.
 
@@ -192,12 +193,12 @@ class OutcomeUntransformer(TensorTransform):
         return output_values.transpose(-2, -1)
 
 
-def get_input_transform(model: GPyTorchModel) -> Optional[InputTransform]:
+def get_input_transform(model: GPyTorchModel) -> InputTransform | None:
     r"""Returns a model's input_transform or None."""
     return getattr(model, "input_transform", None)
 
 
-def get_output_transform(model: GPyTorchModel) -> Optional[OutcomeUntransformer]:
+def get_output_transform(model: GPyTorchModel) -> OutcomeUntransformer | None:
     r"""Returns a wrapped version of a model's outcome_transform or None."""
     transform = getattr(model, "outcome_transform", None)
     if transform is None:
@@ -207,12 +208,12 @@ def get_output_transform(model: GPyTorchModel) -> Optional[OutcomeUntransformer]
 
 
 @overload
-def get_train_inputs(model: Model, transformed: bool = False) -> Tuple[Tensor, ...]:
+def get_train_inputs(model: Model, transformed: bool = False) -> tuple[Tensor, ...]:
     pass  # pragma: no cover
 
 
 @overload
-def get_train_inputs(model: ModelList, transformed: bool = False) -> List[...]:
+def get_train_inputs(model: ModelList, transformed: bool = False) -> list[...]:
     pass  # pragma: no cover
 
 
@@ -221,7 +222,7 @@ def get_train_inputs(model: Model, transformed: bool = False):
 
 
 @GetTrainInputs.register(Model)
-def _get_train_inputs_Model(model: Model, transformed: bool = False) -> Tuple[Tensor]:
+def _get_train_inputs_Model(model: Model, transformed: bool = False) -> tuple[Tensor]:
     if not transformed:
         original_train_input = getattr(model, "_original_train_inputs", None)
         if torch.is_tensor(original_train_input):
@@ -240,7 +241,7 @@ def _get_train_inputs_Model(model: Model, transformed: bool = False) -> Tuple[Te
 @GetTrainInputs.register(SingleTaskVariationalGP)
 def _get_train_inputs_SingleTaskVariationalGP(
     model: SingleTaskVariationalGP, transformed: bool = False
-) -> Tuple[Tensor]:
+) -> tuple[Tensor]:
     (X,) = model.model.train_inputs
     if model.training != transformed:
         return (X,)
@@ -255,7 +256,7 @@ def _get_train_inputs_SingleTaskVariationalGP(
 @GetTrainInputs.register(ModelList)
 def _get_train_inputs_ModelList(
     model: ModelList, transformed: bool = False
-) -> List[...]:
+) -> list[...]:
     return [get_train_inputs(m, transformed=transformed) for m in model.models]
 
 
@@ -265,7 +266,7 @@ def get_train_targets(model: Model, transformed: bool = False) -> Tensor:
 
 
 @overload
-def get_train_targets(model: ModelList, transformed: bool = False) -> List[...]:
+def get_train_targets(model: ModelList, transformed: bool = False) -> list[...]:
     pass  # pragma: no cover
 
 
@@ -277,7 +278,7 @@ def get_train_targets(model: Model, transformed: bool = False):
 def _get_train_targets_Model(model: Model, transformed: bool = False) -> Tensor:
     Y = model.train_targets
 
-    # Note: Avoid using `get_output_transform` here since it creates a Module
+    # Note: Avoid using ``get_output_transform`` here since it creates a Module
     transform = getattr(model, "outcome_transform", None)
     if transformed or transform is None:
         return Y
@@ -299,12 +300,12 @@ def _get_train_targets_SingleTaskVariationalGP(
     if model.num_outputs == 1:
         return transform.untransform(Y.unsqueeze(-1))[0].squeeze(-1)
 
-    # SingleTaskVariationalGP.__init__ doesn't bring the multitoutpout dimension inside
+    # SingleTaskVariationalGP.__init__ doesn't bring the multioutput dimension inside
     return transform.untransform(Y)[0]
 
 
 @GetTrainTargets.register(ModelList)
 def _get_train_targets_ModelList(
     model: ModelList, transformed: bool = False
-) -> List[...]:
+) -> list[...]:
     return [get_train_targets(m, transformed=transformed) for m in model.models]

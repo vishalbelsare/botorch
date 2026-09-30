@@ -11,7 +11,6 @@ The base class for sampler modules to be used with MC-evaluated acquisition func
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
 
 import torch
 from botorch.exceptions.errors import InputDataError
@@ -33,27 +32,26 @@ KWARG_ERR_MSG = (
 class MCSampler(Module, ABC):
     r"""Abstract base class for Samplers.
 
-    Subclasses must implement the `forward` method.
+    Subclasses must implement the ``forward`` method.
 
     Example:
         This method is usually not called directly, but via the sampler's
-        `__call__` method:
+        ``__call__`` method:
         >>> posterior = model.posterior(test_X)
         >>> samples = sampler(posterior)
-
-    :meta private:
     """
 
     def __init__(
         self,
         sample_shape: torch.Size,
-        seed: Optional[int] = None,
+        seed: int | None = None,
     ) -> None:
         r"""Abstract base class for samplers.
 
         Args:
-            sample_shape: The `sample_shape` of the samples to generate. The full shape
-                of the samples is given by `posterior._extended_shape(sample_shape)`.
+            sample_shape: The ``sample_shape`` of the samples to generate. The full
+                shape of the samples is given by
+                ``posterior._extended_shape(sample_shape)``.
             seed: An optional seed to use for sampling.
         """
         super().__init__()
@@ -63,7 +61,9 @@ class MCSampler(Module, ABC):
                 f"got {sample_shape}."
             )
         self.sample_shape = sample_shape
-        self.seed = seed if seed is not None else torch.randint(0, 1000000, (1,)).item()
+        self.seed = (
+            seed if seed is not None else int(torch.randint(0, 1000000, (1,)).item())
+        )
         self.register_buffer("base_samples", None)
 
     @abstractmethod
@@ -78,12 +78,12 @@ class MCSampler(Module, ABC):
         """
         pass  # pragma no cover
 
-    def _get_batch_range(self, posterior: Posterior) -> Tuple[int, int]:
+    def _get_batch_range(self, posterior: Posterior) -> tuple[int, int]:
         r"""Get the t-batch range of the posterior with an optional override.
 
-        In rare cases, e.g., in `qMultiStepLookahead`, we may want to override the
-        `batch_range` of the posterior. If this behavior is desired, one can set
-        `batch_range_override` attribute on the samplers.
+        In rare cases, e.g., in ``qMultiStepLookahead``, we may want to override the
+        ``batch_range`` of the posterior. If this behavior is desired, one can set
+        ``batch_range_override`` attribute on the samplers.
 
         Args:
             posterior: The posterior to sample from.
@@ -142,7 +142,7 @@ class MCSampler(Module, ABC):
         )
 
     def _instance_check(self, base_sampler):
-        r"""Check that `base_sampler` is an instance of `self.__class__`."""
+        r"""Check that ``base_sampler`` is an instance of ``self.__class__``."""
         if not isinstance(base_sampler, self.__class__):
             raise RuntimeError(
                 "Expected `base_sampler` to be an instance of "

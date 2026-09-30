@@ -12,10 +12,13 @@ from botorch.models.utils.assorted import (
     check_standardization,
     consolidate_duplicates,
     detect_duplicates,
+    extract_targets_and_noise_single_output,
     fantasize,
+    get_data_for_optimization_help,
     gpt_posterior_settings,
     mod_batch_shape,
     multioutput_to_batch_mode_transform,
+    restore_targets_and_noise_single_output,
     validate_input_scaling,
 )
 
@@ -27,10 +30,13 @@ __all__ = [
     "check_min_max_scaling",
     "check_standardization",
     "fantasize",
+    "get_data_for_optimization_help",
     "gpt_posterior_settings",
     "multioutput_to_batch_mode_transform",
     "mod_batch_shape",
     "validate_input_scaling",
     "detect_duplicates",
     "consolidate_duplicates",
+    "extract_targets_and_noise_single_output",
+    "restore_targets_and_noise_single_output",
 ]

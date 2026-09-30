@@ -13,20 +13,95 @@ Contributor: hvarfner (bayesian_active_learning, scorebo)
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from collections.abc import Hashable
+from typing import Any
 
 import torch
-from botorch.acquisition.input_constructors import acqf_input_constructor
+from botorch.acquisition.input_constructors import (
+    acqf_input_constructor,
+    get_best_f_analytic,
+)
+from botorch.acquisition.objective import (
+    PosteriorTransform,
+    ScalarizedPosteriorTransform,
+)
 from botorch.acquisition.utils import get_optimal_samples
 from botorch.models.model import Model
+from botorch.utils.datasets import SupervisedDataset
 from botorch_community.acquisition.bayesian_active_learning import (
-    qBayesianActiveLearningByDisagreement,
     qBayesianQueryByComittee,
     qBayesianVarianceReduction,
     qStatisticalDistanceActiveLearning,
 )
+from botorch_community.acquisition.discretized import (
+    DiscretizedExpectedImprovement,
+    DiscretizedNoisyExpectedImprovement,
+    DiscretizedProbabilityOfImprovement,
+)
 from botorch_community.acquisition.scorebo import qSelfCorrectingBayesianOptimization
 from torch import Tensor
+
+
+@acqf_input_constructor(
+    DiscretizedExpectedImprovement, DiscretizedProbabilityOfImprovement
+)
+def construct_inputs_best_f(
+    model: Model,
+    training_data: SupervisedDataset | dict[Hashable, SupervisedDataset],
+    posterior_transform: PosteriorTransform | None = None,
+    best_f: float | Tensor | None = None,
+) -> dict[str, Any]:
+    r"""Construct kwargs for the acquisition functions requiring ``best_f``.
+
+    Args:
+        model: The model to be used in the acquisition function.
+        training_data: Dataset(s) used to train the model.
+            Used to determine default value for ``best_f``.
+        best_f: Threshold above (or below) which improvement is defined.
+        posterior_transform: The posterior transform to be used in the
+            acquisition function.
+
+    Returns:
+        A dict mapping kwarg names of the constructor to values.
+    """
+    if best_f is None:
+        best_f = get_best_f_analytic(
+            training_data=training_data,
+            posterior_transform=posterior_transform,
+        )
+
+    return {
+        "model": model,
+        "posterior_transform": posterior_transform,
+        "best_f": best_f,
+    }
+
+
+@acqf_input_constructor(DiscretizedNoisyExpectedImprovement)
+def construct_inputs_noisy(
+    model: Model,
+    posterior_transform: PosteriorTransform | None = None,
+    X_pending: Tensor | None = None,
+) -> dict[str, Any]:
+    r"""Construct kwargs for the acquisition functions requiring ``best_f``.
+
+    Args:
+        model: The model to be used in the acquisition function.
+        best_f: Threshold above (or below) which improvement is defined.
+        posterior_transform: The posterior transform to be used in the
+            acquisition function.
+        X_pending: Points already tried, but not yet included in the
+            training data.
+
+
+    Returns:
+        A dict mapping kwarg names of the constructor to values.
+    """
+    return {
+        "model": model,
+        "posterior_transform": posterior_transform,
+        "X_pending": X_pending,
+    }
 
 
 @acqf_input_constructor(
@@ -35,19 +110,7 @@ from torch import Tensor
 )
 def construct_inputs_BAL(
     model: Model,
-    X_pending: Optional[Tensor] = None,
-):
-    inputs = {
-        "model": model,
-        "X_pending": X_pending,
-    }
-    return inputs
-
-
-@acqf_input_constructor(qBayesianActiveLearningByDisagreement)
-def construct_inputs_BALD(
-    model: Model,
-    X_pending: Optional[Tensor] = None,
+    X_pending: Tensor | None = None,
 ):
     inputs = {
         "model": model,
@@ -60,7 +123,7 @@ def construct_inputs_BALD(
 def construct_inputs_SAL(
     model: Model,
     distance_metric: str = "hellinger",
-    X_pending: Optional[Tensor] = None,
+    X_pending: Tensor | None = None,
 ):
     inputs = {
         "model": model,
@@ -73,11 +136,11 @@ def construct_inputs_SAL(
 @acqf_input_constructor(qSelfCorrectingBayesianOptimization)
 def construct_inputs_SCoreBO(
     model: Model,
-    bounds: List[Tuple[float, float]],
+    bounds: list[tuple[float, float]],
     num_optima: int = 8,
-    maximize: bool = True,
+    posterior_transform: ScalarizedPosteriorTransform | None = None,
     distance_metric: str = "hellinger",
-    X_pending: Optional[Tensor] = None,
+    X_pending: Tensor | None = None,
 ):
     dtype = model.train_targets.dtype
     # the number of optima are per model
@@ -85,15 +148,15 @@ def construct_inputs_SCoreBO(
         model=model,
         bounds=torch.as_tensor(bounds, dtype=dtype).T,
         num_optima=num_optima,
-        maximize=maximize,
+        posterior_transform=posterior_transform,
+        return_transformed=True,
     )
-
     inputs = {
         "model": model,
         "optimal_inputs": optimal_inputs,
         "optimal_outputs": optimal_outputs,
         "distance_metric": distance_metric,
-        "maximize": maximize,
+        "posterior_transform": posterior_transform,
         "X_pending": X_pending,
     }
     return inputs

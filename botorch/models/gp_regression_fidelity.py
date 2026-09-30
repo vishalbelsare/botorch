@@ -8,7 +8,7 @@ r"""
 Multi-Fidelity Gaussian Process Regression models based on GPyTorch models.
 
 For more on Multi-Fidelity BO, see the
-`tutorial <https://botorch.org/tutorials/discrete_multi_fidelity_bo>`__.
+`tutorial <https://botorch.org/docs/tutorials/discrete_multi_fidelity_bo>`__.
 
 A common use case of multi-fidelity regression modeling is optimizing a
 "high-fidelity" function that is expensive to simulate when you have access to
@@ -25,9 +25,8 @@ without having to do too many expensive high-fidelity evaluations.
 
 from __future__ import annotations
 
-import warnings
-
-from typing import Any, Dict, List, Optional, Tuple, Union
+from collections.abc import Sequence
+from typing import Any, cast
 
 import torch
 from botorch.exceptions.errors import UnsupportedError
@@ -39,11 +38,14 @@ from botorch.models.kernels.linear_truncated_fidelity import (
 )
 from botorch.models.transforms.input import InputTransform
 from botorch.models.transforms.outcome import OutcomeTransform
+from botorch.models.utils.gpytorch_modules import get_covar_module_with_dim_scaled_prior
 from botorch.utils.datasets import SupervisedDataset
+from botorch.utils.types import _DefaultType, DEFAULT
 from gpytorch.kernels.kernel import ProductKernel
-from gpytorch.kernels.rbf_kernel import RBFKernel
 from gpytorch.kernels.scale_kernel import ScaleKernel
 from gpytorch.likelihoods.likelihood import Likelihood
+from gpytorch.means.mean import Mean
+from gpytorch.module import Module
 from gpytorch.priors.torch_priors import GammaPrior
 from torch import Tensor
 
@@ -67,62 +69,56 @@ class SingleTaskMultiFidelityGP(SingleTaskGP):
         self,
         train_X: Tensor,
         train_Y: Tensor,
-        train_Yvar: Optional[Tensor] = None,
-        iteration_fidelity: Optional[int] = None,
-        data_fidelities: Optional[Union[List[int], Tuple[int]]] = None,
-        data_fidelity: Optional[int] = None,
+        train_Yvar: Tensor | None = None,
+        iteration_fidelity: int | None = None,
+        data_fidelities: Sequence[int] | None = None,
         linear_truncated: bool = True,
         nu: float = 2.5,
-        likelihood: Optional[Likelihood] = None,
-        outcome_transform: Optional[OutcomeTransform] = None,
-        input_transform: Optional[InputTransform] = None,
+        covar_module: Module | None = None,
+        likelihood: Likelihood | None = None,
+        outcome_transform: OutcomeTransform | _DefaultType | None = DEFAULT,
+        input_transform: InputTransform | None = None,
+        mean_module: Mean | None = None,
     ) -> None:
         r"""
         Args:
-            train_X: A `batch_shape x n x (d + s)` tensor of training features,
-                where `s` is the dimension of the fidelity parameters (either one
+            train_X: A ``batch_shape x n x (d + s)`` tensor of training features,
+                where ``s`` is the dimension of the fidelity parameters (either one
                 or two).
-            train_Y: A `batch_shape x n x m` tensor of training observations.
-            train_Yvar: An optional `batch_shape x n x m` tensor of observed
+            train_Y: A ``batch_shape x n x m`` tensor of training observations.
+            train_Yvar: An optional ``batch_shape x n x m`` tensor of observed
                 measurement noise.
             iteration_fidelity: The column index for the training iteration fidelity
                 parameter (optional).
             data_fidelities: The column indices for the downsampling fidelity parameter.
                 If a list/tuple of indices is provided, a kernel will be constructed for
                 each index (optional).
-            data_fidelity: The column index for the downsampling fidelity parameter
-                (optional). Deprecated in favor of `data_fidelities`.
-            linear_truncated: If True, use a `LinearTruncatedFidelityKernel` instead
+            linear_truncated: If True, use a ``LinearTruncatedFidelityKernel`` instead
                 of the default kernel.
             nu: The smoothness parameter for the Matern kernel: either 1/2, 3/2, or
-                5/2. Only used when `linear_truncated=True`.
+                5/2. Only used when ``linear_truncated=True``.
+            covar_module: The module for computing the covariance matrix between
+                the non-fidelity features. Defaults to ``RBFKernel``.
             likelihood: A likelihood. If omitted, use a standard GaussianLikelihood
                 with inferred noise level.
             outcome_transform: An outcome transform that is applied to the
-                    training data during instantiation and to the posterior during
-                    inference (that is, the `Posterior` obtained by calling
-                    `.posterior` on the model will be on the original scale).
+                training data during instantiation and to the posterior during
+                inference (that is, the ``Posterior`` obtained by calling
+                ``.posterior`` on the model will be on the original scale). We use a
+                ``Standardize`` transform if no ``outcome_transform`` is specified.
+                Pass down ``None`` to use no outcome transform.
             input_transform: An input transform that is applied in the model's
                     forward pass.
+            mean_module: The mean function to be used. If omitted, use a
+                ``ConstantMean``.
         """
-        if data_fidelity is not None:
-            warnings.warn(
-                "The `data_fidelity` argument is deprecated and will be removed in "
-                "a future release. Please use `data_fidelities` instead.",
-                DeprecationWarning,
-            )
-            if data_fidelities is not None:
-                raise ValueError(
-                    "Cannot specify both `data_fidelity` and `data_fidelities`."
-                )
-            data_fidelities = [data_fidelity]
-
         self._init_args = {
             "iteration_fidelity": iteration_fidelity,
             "data_fidelities": data_fidelities,
             "linear_truncated": linear_truncated,
             "nu": nu,
             "outcome_transform": outcome_transform,
+            "mean_module": mean_module,
         }
         if iteration_fidelity is None and (
             data_fidelities is None or len(data_fidelities) == 0
@@ -143,6 +139,7 @@ class SingleTaskMultiFidelityGP(SingleTaskGP):
             data_fidelities=data_fidelities,
             linear_truncated=linear_truncated,
             nu=nu,
+            data_covar_module=covar_module,
         )
         super().__init__(
             train_X=train_X,
@@ -150,14 +147,24 @@ class SingleTaskMultiFidelityGP(SingleTaskGP):
             train_Yvar=train_Yvar,
             likelihood=likelihood,
             covar_module=covar_module,
+            mean_module=mean_module,
             outcome_transform=outcome_transform,
             input_transform=input_transform,
         )
+        # Used for subsetting along the output dimension. See Model.subset_output.
         self._subset_batch_dict = {
-            "mean_module.raw_constant": -1,
-            "covar_module.raw_outputscale": -1,
             **subset_batch_dict,
         }
+        raw_mean_constant = dict(self.mean_module.named_parameters()).get(
+            "raw_constant"
+        )
+        if (
+            raw_mean_constant is not None
+            and raw_mean_constant.shape == self._aug_batch_shape
+        ):
+            self._subset_batch_dict["mean_module.raw_constant"] = -1
+        if linear_truncated:
+            self._subset_batch_dict["covar_module.raw_outputscale"] = -1
         if train_Yvar is None:
             self._subset_batch_dict["likelihood.noise_covar.raw_noise"] = -2
         self.to(train_X)
@@ -166,79 +173,60 @@ class SingleTaskMultiFidelityGP(SingleTaskGP):
     def construct_inputs(
         cls,
         training_data: SupervisedDataset,
-        fidelity_features: List[int],
-    ) -> Dict[str, Any]:
-        r"""Construct `Model` keyword arguments from a dict of `SupervisedDataset`.
+        fidelity_features: list[int],
+    ) -> dict[str, Any]:
+        r"""Construct ``Model`` keyword arguments from a dict of ``SupervisedDataset``.
 
         Args:
-            training_data: Dictionary of `SupervisedDataset`.
+            training_data: Dictionary of ``SupervisedDataset``.
             fidelity_features: Index of fidelity parameter as input columns.
         """
         inputs = super().construct_inputs(training_data=training_data)
         inputs["data_fidelities"] = fidelity_features
         return inputs
 
-
-class FixedNoiseMultiFidelityGP(SingleTaskMultiFidelityGP):
-    def __init__(
-        self,
-        train_X: Tensor,
-        train_Y: Tensor,
-        train_Yvar: Tensor,
-        iteration_fidelity: Optional[int] = None,
-        data_fidelities: Optional[Union[List[int], Tuple[int]]] = None,
-        data_fidelity: Optional[int] = None,
-        linear_truncated: bool = True,
-        nu: float = 2.5,
-        outcome_transform: Optional[OutcomeTransform] = None,
-        input_transform: Optional[InputTransform] = None,
-    ) -> None:
-        r"""DEPRECATED: Use `SingleTaskMultiFidelityGP` instead.
-        Will be removed in a future release (~v0.11).
-        """
-        warnings.warn(
-            "`FixedNoiseMultiFidelityGP` has been deprecated. "
-            "Use `SingleTaskMultiFidelityGP` with `train_Yvar` instead.",
-            DeprecationWarning,
-        )
-        super().__init__(
-            train_X=train_X,
-            train_Y=train_Y,
-            train_Yvar=train_Yvar,
-            iteration_fidelity=iteration_fidelity,
-            data_fidelities=data_fidelities,
-            data_fidelity=data_fidelity,
-            linear_truncated=linear_truncated,
-            nu=nu,
-            outcome_transform=outcome_transform,
-            input_transform=input_transform,
-        )
+    def subset_output(self, idcs: list[int]) -> SingleTaskMultiFidelityGP:
+        if self.num_outputs != len(idcs) or idcs != list(range(self.num_outputs)):
+            for name, parameter in self.mean_module.named_parameters():
+                if f"mean_module.{name}" in self._subset_batch_dict:
+                    continue
+                if (
+                    parameter.shape[: len(self._aug_batch_shape)]
+                    == self._aug_batch_shape
+                ):
+                    raise UnsupportedError(
+                        "`subset_output` is not supported for custom mean modules "
+                        "with output-batched parameters."
+                    )
+        return cast(SingleTaskMultiFidelityGP, super().subset_output(idcs=idcs))
 
 
 def _setup_multifidelity_covar_module(
     dim: int,
     aug_batch_shape: torch.Size,
-    iteration_fidelity: Optional[int],
-    data_fidelities: Optional[List[int]],
+    iteration_fidelity: int | None,
+    data_fidelities: Sequence[int] | None,
     linear_truncated: bool,
     nu: float,
-) -> Tuple[ScaleKernel, Dict]:
+    data_covar_module: Module | None = None,
+) -> tuple[ScaleKernel | ProductKernel, dict[str, int]]:
     """Helper function to get the covariance module and associated subset_batch_dict
     for the multifidelity setting.
 
     Args:
         dim: The dimensionality of the training data.
         aug_batch_shape: The output-augmented batch shape as defined in
-            `BatchedMultiOutputGPyTorchModel`.
+            ``BatchedMultiOutputGPyTorchModel``.
         iteration_fidelity: The column index for the training iteration fidelity
             parameter (optional).
         data_fidelities: The column indices for the downsampling fidelity parameters
             (optional).
-        linear_truncated: If True, use a `LinearTruncatedFidelityKernel` instead
+        linear_truncated: If True, use a ``LinearTruncatedFidelityKernel`` instead
             of the default kernel.
         nu: The smoothness parameter for the Matern kernel: either 1/2, 3/2, or
-            5/2. Only used when `linear_truncated=True`.
-
+            5/2. Only used when ``linear_truncated=True``.
+        data_covar_module: The module for computing the covariance matrix between
+                the non-fidelity features. Defaults to ``RBFKernel``.
     Returns:
         The covariance module and subset_batch_dict.
     """
@@ -246,11 +234,18 @@ def _setup_multifidelity_covar_module(
     if iteration_fidelity is not None and iteration_fidelity < 0:
         iteration_fidelity = dim + iteration_fidelity
     if data_fidelities is not None:
+        data_fidelities = list(data_fidelities)
         for i in range(len(data_fidelities)):
             if data_fidelities[i] < 0:
                 data_fidelities[i] = dim + data_fidelities[i]
 
     kernels = []
+
+    if linear_truncated and data_covar_module is not None:
+        raise ValueError(
+            "Non-fidelity covariance module cannot be specified when using a linear "
+            "truncated kernel."
+        )
 
     if linear_truncated:
         leading_dims = [iteration_fidelity] if iteration_fidelity is not None else []
@@ -272,14 +267,18 @@ def _setup_multifidelity_covar_module(
         if iteration_fidelity is not None:
             non_active_dims.add(iteration_fidelity)
         active_dimsX = sorted(set(range(dim)) - non_active_dims)
-        kernels.append(
-            RBFKernel(
-                ard_num_dims=len(active_dimsX),
-                batch_shape=aug_batch_shape,
-                lengthscale_prior=GammaPrior(3.0, 6.0),
-                active_dims=active_dimsX,
+
+        if data_covar_module is None:
+            kernels.append(
+                get_covar_module_with_dim_scaled_prior(
+                    ard_num_dims=len(active_dimsX),
+                    batch_shape=aug_batch_shape,
+                    active_dims=active_dimsX,
+                )
             )
-        )
+        else:
+            kernels.append(data_covar_module)
+
         if iteration_fidelity is not None:
             kernels.append(
                 ExponentialDecayKernel(
@@ -303,11 +302,15 @@ def _setup_multifidelity_covar_module(
 
     kernel = ProductKernel(*kernels)
 
-    covar_module = ScaleKernel(
-        kernel, batch_shape=aug_batch_shape, outputscale_prior=GammaPrior(2.0, 0.15)
-    )
+    if linear_truncated:
+        covar_module = ScaleKernel(
+            kernel, batch_shape=aug_batch_shape, outputscale_prior=GammaPrior(2.0, 0.15)
+        )
+        key_prefix = "covar_module.base_kernel.kernels"
+    else:
+        covar_module = kernel
+        key_prefix = "covar_module.kernels"
 
-    key_prefix = "covar_module.base_kernel.kernels"
     if linear_truncated:
         subset_batch_dict = {}
         for i in range(len(kernels)):
@@ -319,9 +322,15 @@ def _setup_multifidelity_covar_module(
                 }
             )
     else:
-        subset_batch_dict = {
-            f"{key_prefix}.0.raw_lengthscale": -3,
-        }
+        subset_batch_dict = {}
+
+        # Only set the subset_batch_dict if using the default kernel. See SingleTaskGP.
+        if data_covar_module is None:
+            subset_batch_dict.update(
+                {
+                    f"{key_prefix}.0.raw_lengthscale": -3,
+                }
+            )
 
         if iteration_fidelity is not None:
             subset_batch_dict.update(

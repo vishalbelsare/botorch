@@ -4,13 +4,16 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import warnings
 from itertools import product
 from unittest import mock
 
 import numpy as np
-
 import torch
-from botorch.acquisition.cost_aware import InverseCostWeightedUtility
+from botorch.acquisition.cost_aware import (
+    GenericCostAwareUtility,
+    InverseCostWeightedUtility,
+)
 from botorch.acquisition.multi_objective.hypervolume_knowledge_gradient import (
     _get_hv_value_function,
     _split_hvkg_fantasy_points,
@@ -21,7 +24,8 @@ from botorch.acquisition.multi_objective.objective import (
     GenericMCMultiOutputObjective,
     IdentityMCMultiOutputObjective,
 )
-from botorch.exceptions.errors import UnsupportedError
+from botorch.exceptions.errors import BotorchError, UnsupportedError
+from botorch.exceptions.warnings import NumericsWarning
 from botorch.models.deterministic import GenericDeterministicModel
 from botorch.models.gp_regression import SingleTaskGP
 from botorch.models.model_list_gp_regression import ModelListGP
@@ -167,11 +171,13 @@ class TestHypervolumeKnowledgeGradient(BotorchTestCase):
                     )
 
     def test_evaluate_q_hvkg(self):
+        torch.manual_seed(torch.randint(low=0, high=10, size=(1,)).item())
         tkwargs = {"device": self.device}
         num_pareto = 3
-        for dtype, acqf_class in product(
+        for dtype, acqf_class, log_ehvi in product(
             (torch.float, torch.double),
             (qHypervolumeKnowledgeGradient, qMultiFidelityHypervolumeKnowledgeGradient),
+            (False, True),
         ):
             tkwargs["dtype"] = dtype
             # basic test
@@ -190,30 +196,35 @@ class TestHypervolumeKnowledgeGradient(BotorchTestCase):
             else:
                 mf_kwargs = {}
 
-            with mock.patch.object(
-                ModelListGP, "fantasize", return_value=mfm
-            ) as patch_f:
-                with mock.patch(NO, new_callable=mock.PropertyMock) as mock_num_outputs:
-                    mock_num_outputs.return_value = 2
-
-                    qHVKG = acqf_class(
-                        model=model,
-                        num_fantasies=n_f,
-                        ref_point=ref_point,
-                        num_pareto=num_pareto,
-                        **mf_kwargs,
-                    )
-                    X = torch.rand(n_f * num_pareto + 1, 1, **tkwargs)
-                    val = qHVKG(X)
-                    patch_f.assert_called_once()
-                    cargs, ckwargs = patch_f.call_args
-                    self.assertEqual(ckwargs["X"].shape, torch.Size([1, 1, 1]))
+            with (
+                mock.patch.object(
+                    ModelListGP, "fantasize", return_value=mfm
+                ) as patch_f,
+                mock.patch(NO, new_callable=mock.PropertyMock) as mock_num_outputs,
+            ):
+                mock_num_outputs.return_value = 2
+                qHVKG = acqf_class(
+                    model=model,
+                    num_fantasies=n_f,
+                    ref_point=ref_point,
+                    num_pareto=num_pareto,
+                    log=log_ehvi,
+                    **mf_kwargs,
+                )
+                X = torch.rand(n_f * num_pareto + 1, 1, **tkwargs)
+                val = qHVKG(X)
+                patch_f.assert_called_once()
+                cargs, ckwargs = patch_f.call_args
+                self.assertEqual(ckwargs["X"].shape, torch.Size([1, 1, 1]))
             expected_hv = (
                 DominatedPartitioning(Y=mean.squeeze(1), ref_point=ref_point)
                 .compute_hypervolume()
                 .mean()
             )
-            self.assertAllClose(val.item(), expected_hv.item(), atol=1e-4)
+            if log_ehvi:
+                self.assertAllClose(val.exp().item(), expected_hv.item(), rtol=1e-1)
+            else:
+                self.assertAllClose(val.item(), expected_hv.item(), atol=1e-4)
             self.assertTrue(
                 torch.equal(qHVKG.extract_candidates(X), X[..., : -n_f * num_pareto, :])
             )
@@ -224,22 +235,25 @@ class TestHypervolumeKnowledgeGradient(BotorchTestCase):
             variance = torch.rand(n_f, b, num_pareto, 2, **tkwargs)
             mfm = MockModel(MockPosterior(mean=mean, variance=variance))
             X = torch.rand(b, n_f * num_pareto + 1, 1, **tkwargs)
-            with mock.patch.object(
-                ModelListGP, "fantasize", return_value=mfm
-            ) as patch_f:
-                with mock.patch(NO, new_callable=mock.PropertyMock) as mock_num_outputs:
-                    mock_num_outputs.return_value = 2
-                    qHVKG = acqf_class(
-                        model=model,
-                        num_fantasies=n_f,
-                        ref_point=ref_point,
-                        num_pareto=num_pareto,
-                        **mf_kwargs,
-                    )
-                    val = qHVKG(X)
-                    patch_f.assert_called_once()
-                    cargs, ckwargs = patch_f.call_args
-                    self.assertEqual(ckwargs["X"].shape, torch.Size([b, 1, 1]))
+            with (
+                mock.patch.object(
+                    ModelListGP, "fantasize", return_value=mfm
+                ) as patch_f,
+                mock.patch(NO, new_callable=mock.PropertyMock) as mock_num_outputs,
+            ):
+                mock_num_outputs.return_value = 2
+                qHVKG = acqf_class(
+                    model=model,
+                    num_fantasies=n_f,
+                    ref_point=ref_point,
+                    num_pareto=num_pareto,
+                    log=log_ehvi,
+                    **mf_kwargs,
+                )
+                val = qHVKG(X)
+                patch_f.assert_called_once()
+                cargs, ckwargs = patch_f.call_args
+                self.assertEqual(ckwargs["X"].shape, torch.Size([b, 1, 1]))
             expected_hv = (
                 DominatedPartitioning(
                     Y=mean.view(-1, num_pareto, 2), ref_point=ref_point
@@ -248,7 +262,10 @@ class TestHypervolumeKnowledgeGradient(BotorchTestCase):
                 .view(n_f, b)
                 .mean(dim=0)
             )
-            self.assertAllClose(val, expected_hv, atol=1e-4)
+            if log_ehvi:
+                self.assertAllClose(val.exp(), expected_hv, rtol=1e-1)
+            else:
+                self.assertAllClose(val, expected_hv, atol=1e-4)
             self.assertTrue(
                 torch.equal(qHVKG.extract_candidates(X), X[..., : -n_f * num_pareto, :])
             )
@@ -261,38 +278,47 @@ class TestHypervolumeKnowledgeGradient(BotorchTestCase):
             mean = torch.rand(n_f, 1, num_pareto, 2, **tkwargs)
             variance = torch.rand(n_f, 1, num_pareto, 2, **tkwargs)
             mfm = MockModel(MockPosterior(mean=mean, variance=variance))
-            current_value = torch.tensor(0.0, **tkwargs)
             X = torch.rand(n_f * num_pareto + 1, 1, **tkwargs)
-            cost_aware_utility = InverseCostWeightedUtility(
-                cost_model=GenericDeterministicModel(cost_fn, num_outputs=2)
+            current_value = torch.tensor(0.01, **tkwargs)
+            # if log flag is on, current_value is expected to be in log space
+            input_current_value = (
+                torch.log(current_value) if log_ehvi else current_value
             )
-            with mock.patch.object(
-                ModelListGP, "fantasize", return_value=mfm
-            ) as patch_f:
-                with mock.patch(NO, new_callable=mock.PropertyMock) as mock_num_outputs:
-                    mock_num_outputs.return_value = 2
-                    qHVKG = acqf_class(
-                        model=model,
-                        num_fantasies=n_f,
-                        X_pending=X_pending,
-                        X_pending_evaluation_mask=X_pending_evaluation_mask,
-                        X_evaluation_mask=X_evaluation_mask,
-                        current_value=current_value,
-                        ref_point=ref_point,
-                        num_pareto=num_pareto,
-                        cost_aware_utility=cost_aware_utility,
-                        **mf_kwargs,
-                    )
-                    val = qHVKG(X)
-                    patch_f.assert_called_once()
-                    expected_eval_mask = torch.cat(
-                        [X_evaluation_mask, X_pending_evaluation_mask], dim=0
-                    )
-                    cargs, ckwargs = patch_f.call_args
-                    self.assertEqual(ckwargs["X"].shape, torch.Size([1, 3, 1]))
-                    self.assertTrue(
-                        torch.equal(ckwargs["evaluation_mask"], expected_eval_mask)
-                    )
+            # if log flag is on, the cost_aware_utility should be in log space
+            cost_aware_utility = InverseCostWeightedUtility(
+                cost_model=GenericDeterministicModel(cost_fn, num_outputs=2),
+                log=log_ehvi,
+            )
+            with (
+                mock.patch.object(
+                    ModelListGP, "fantasize", return_value=mfm
+                ) as patch_f,
+                mock.patch(NO, new_callable=mock.PropertyMock) as mock_num_outputs,
+            ):
+                mock_num_outputs.return_value = 2
+                qHVKG = acqf_class(
+                    model=model,
+                    num_fantasies=n_f,
+                    X_pending=X_pending,
+                    X_pending_evaluation_mask=X_pending_evaluation_mask,
+                    X_evaluation_mask=X_evaluation_mask,
+                    current_value=input_current_value,
+                    ref_point=ref_point,
+                    num_pareto=num_pareto,
+                    cost_aware_utility=cost_aware_utility,
+                    log=log_ehvi,
+                    **mf_kwargs,
+                )
+                val = qHVKG(X)
+                patch_f.assert_called_once()
+                expected_eval_mask = torch.cat(
+                    [X_evaluation_mask, X_pending_evaluation_mask], dim=0
+                )
+                cargs, ckwargs = patch_f.call_args
+                self.assertEqual(ckwargs["X"].shape, torch.Size([1, 3, 1]))
+                self.assertTrue(
+                    torch.equal(ckwargs["evaluation_mask"], expected_eval_mask)
+                )
             expected_hv = (
                 DominatedPartitioning(Y=mean.squeeze(1), ref_point=ref_point)
                 .compute_hypervolume()
@@ -300,42 +326,113 @@ class TestHypervolumeKnowledgeGradient(BotorchTestCase):
             )
             # divide by 3 because the cost is 3 per design
             expected = (expected_hv.mean() - current_value).item() / 3
-            self.assertAllClose(val.item(), expected, atol=1e-4)
+            if log_ehvi:
+                self.assertAllClose(
+                    val.exp().item(),
+                    expected,
+                    rtol=1e-1,
+                )
+            else:
+                self.assertAllClose(val.item(), expected, atol=1e-4)
             self.assertTrue(
                 torch.equal(qHVKG.extract_candidates(X), X[..., : -n_f * num_pareto, :])
             )
+
+            # test that it raises an error if cost_aware_utility is not Logged
+            if log_ehvi:
+                cost_aware_utility = InverseCostWeightedUtility(
+                    cost_model=GenericDeterministicModel(cost_fn, num_outputs=2),
+                    log=False,
+                )
+                with (
+                    mock.patch.object(
+                        ModelListGP, "fantasize", return_value=mfm
+                    ) as patch_f,
+                    mock.patch(NO, new_callable=mock.PropertyMock) as mock_num_outputs,
+                ):
+                    mock_num_outputs.return_value = 2
+                    qHVKG = acqf_class(
+                        model=model,
+                        num_fantasies=n_f,
+                        current_value=input_current_value,
+                        ref_point=ref_point,
+                        num_pareto=num_pareto,
+                        cost_aware_utility=cost_aware_utility,
+                        log=log_ehvi,
+                        **mf_kwargs,
+                    )
+                    # raises error when log=False
+                    with self.assertRaisesRegex(
+                        BotorchError,
+                        "Cost-aware HVKG has _log=True and requires cost_aware_utility "
+                        "to output log utilities.",
+                    ):
+                        val = qHVKG(X)
+
+                # check log is not a class attribute of cost_aware_utility
+                # Generic cost aware utility does not have a log flag
+                cost_aware_utility = GenericCostAwareUtility(
+                    cost=GenericDeterministicModel(cost_fn, num_outputs=2),
+                )
+                with (
+                    mock.patch.object(
+                        ModelListGP, "fantasize", return_value=mfm
+                    ) as patch_f,
+                    mock.patch(NO, new_callable=mock.PropertyMock) as mock_num_outputs,
+                ):
+                    mock_num_outputs.return_value = 2
+                    qHVKG = acqf_class(
+                        model=model,
+                        num_fantasies=n_f,
+                        current_value=input_current_value,
+                        ref_point=ref_point,
+                        num_pareto=num_pareto,
+                        cost_aware_utility=cost_aware_utility,
+                        log=log_ehvi,
+                        **mf_kwargs,
+                    )
+                    # raises error when log is not a class variable
+                    with self.assertRaisesRegex(
+                        BotorchError,
+                        "Cost-aware HVKG has _log=True and requires cost_aware_utility "
+                        "to output log utilities.",
+                    ):
+                        val = qHVKG(X)
 
             # test mfkg
             if acqf_class == qMultiFidelityHypervolumeKnowledgeGradient:
                 mean = torch.rand(n_f, 1, num_pareto, 2, **tkwargs)
                 variance = torch.rand(n_f, 1, num_pareto, 2, **tkwargs)
                 mfm = MockModel(MockPosterior(mean=mean, variance=variance))
-                current_value = torch.rand(1, **tkwargs)
+                current_value = torch.rand(1, **tkwargs) if not log_ehvi else None
                 X = torch.rand(n_f * num_pareto + 1, 1, **tkwargs)
                 with mock.patch(
                     "botorch.acquisition.multi_objective."
                     "hypervolume_knowledge_gradient._get_hv_value_function",
                     wraps=_get_hv_value_function,
                 ) as mock_get_value_func:
-                    with mock.patch.object(
-                        ModelListGP, "fantasize", return_value=mfm
-                    ) as patch_f:
-                        with mock.patch(
+                    with (
+                        mock.patch.object(
+                            ModelListGP, "fantasize", return_value=mfm
+                        ) as patch_f,
+                        mock.patch(
                             NO, new_callable=mock.PropertyMock
-                        ) as mock_num_outputs:
-                            mock_num_outputs.return_value = 2
-                            qHVKG = acqf_class(
-                                model=model,
-                                num_fantasies=n_f,
-                                current_value=current_value,
-                                ref_point=ref_point,
-                                num_pareto=num_pareto,
-                                **mf_kwargs,
-                            )
-                            val = qHVKG(X)
-                            self.assertIsNotNone(
-                                mock_get_value_func.call_args_list[0][1]["project"]
-                            )
+                        ) as mock_num_outputs,
+                    ):
+                        mock_num_outputs.return_value = 2
+                        qHVKG = acqf_class(
+                            model=model,
+                            num_fantasies=n_f,
+                            current_value=current_value,
+                            ref_point=ref_point,
+                            num_pareto=num_pareto,
+                            log=log_ehvi,
+                            **mf_kwargs,
+                        )
+                        val = qHVKG(X)
+                        self.assertIsNotNone(
+                            mock_get_value_func.call_args_list[0][1]["project"]
+                        )
 
             # test objective (inner MC sampling)
             mean = torch.rand(n_f, 1, num_pareto, 3, **tkwargs)
@@ -364,26 +461,31 @@ class TestHypervolumeKnowledgeGradient(BotorchTestCase):
                 X = torch.rand(n_f * num_pareto + 1, 1, **tkwargs)
 
                 for use_posterior_mean in (True, False):
-                    with mock.patch.object(
-                        ModelListGP, "fantasize", return_value=mfm
-                    ) as patch_f:
-                        with mock.patch(
+                    with (
+                        mock.patch.object(
+                            ModelListGP, "fantasize", return_value=mfm
+                        ) as patch_f,
+                        mock.patch(
                             NO, new_callable=mock.PropertyMock
-                        ) as mock_num_outputs:
-                            mock_num_outputs.return_value = 3
-                            qHVKG = acqf_class(
-                                model=model,
-                                num_fantasies=n_f,
-                                objective=objective,
-                                ref_point=ref_point,
-                                num_pareto=num_pareto,
-                                use_posterior_mean=use_posterior_mean,
-                                **mf_kwargs,
-                            )
-                            val = qHVKG(X)
-                            patch_f.assert_called_once()
-                            cargs, ckwargs = patch_f.call_args
-                            self.assertEqual(ckwargs["X"].shape, torch.Size([1, 1, 1]))
+                        ) as mock_num_outputs,
+                        warnings.catch_warnings(record=True) as ws,
+                    ):
+                        mock_num_outputs.return_value = 3
+                        qHVKG = acqf_class(
+                            model=model,
+                            num_fantasies=n_f,
+                            objective=objective,
+                            ref_point=ref_point,
+                            num_pareto=num_pareto,
+                            use_posterior_mean=use_posterior_mean,
+                            log=log_ehvi,
+                            **mf_kwargs,
+                        )
+                        val = qHVKG(X)
+                    patch_f.assert_called_once()
+                    cargs, ckwargs = patch_f.call_args
+                    self.assertEqual(ckwargs["X"].shape, torch.Size([1, 1, 1]))
+                    self.assertFalse(any(w.category is NumericsWarning for w in ws))
                     Ys = mean if use_posterior_mean else samples
                     objs = objective(Ys.squeeze(1)).view(-1, num_pareto, num_objectives)
                     if num_objectives == 2:
@@ -405,10 +507,14 @@ class TestHypervolumeKnowledgeGradient(BotorchTestCase):
                                 for obj in objs
                             ]
                         )
-                    self.assertAllClose(val.item(), expected_hv, atol=1e-4)
+                    if log_ehvi:
+                        self.assertAllClose(val.exp().item(), expected_hv, rtol=1e-1)
+                    else:
+                        self.assertAllClose(val.item(), expected_hv, atol=1e-4)
                     self.assertTrue(
                         torch.equal(
-                            qHVKG.extract_candidates(X), X[..., : -n_f * num_pareto, :]
+                            qHVKG.extract_candidates(X),
+                            X[..., : -n_f * num_pareto, :],
                         )
                     )
 
@@ -434,7 +540,7 @@ class TestHypervolumeKnowledgeGradient(BotorchTestCase):
         n_f = 100
         num_pareto = 3
         msg = (
-            rf".*\({n_f*num_pareto}\) must be less than"
+            rf".*\({n_f * num_pareto}\) must be less than"
             rf" the `q`-batch dimension of `X` \({X.size(-2)}\)\."
         )
         with self.assertRaisesRegex(ValueError, msg):

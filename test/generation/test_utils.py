@@ -9,10 +9,8 @@ from __future__ import annotations
 from itertools import product
 
 import torch
-
 from botorch.acquisition import FixedFeatureAcquisitionFunction
 from botorch.generation.utils import (
-    _convert_nonlinear_inequality_constraints,
     _flip_sub_unique,
     _remove_fixed_features_from_optimization,
 )
@@ -20,27 +18,6 @@ from botorch.utils.testing import BotorchTestCase, MockAcquisitionFunction
 
 
 class TestGenerationUtils(BotorchTestCase):
-    def test_convert_nonlinear_inequality_constraints(self):
-        def nlc(x):
-            return x[..., 2]
-
-        def nlc2(x):
-            return x[..., 3]
-
-        nlcs = [nlc]
-        with self.assertWarns(DeprecationWarning):
-            new_nlcs = _convert_nonlinear_inequality_constraints(nlcs)
-        self.assertEqual(new_nlcs, [(nlc, True)])
-
-        nlcs = [(nlc, False)]
-        new_nlcs = _convert_nonlinear_inequality_constraints(nlcs)
-        self.assertEqual(new_nlcs, [(nlc, False)])
-
-        nlcs = [(nlc, False), nlc2]
-        with self.assertWarns(DeprecationWarning):
-            new_nlcs = _convert_nonlinear_inequality_constraints(nlcs)
-        self.assertEqual(new_nlcs, [(nlc, False), (nlc2, True)])
-
     def test_flip_sub_unique(self):
         for dtype in (torch.float, torch.double):
             tkwargs = {"device": self.device, "dtype": dtype}
@@ -144,6 +121,7 @@ class TestGenerationUtils(BotorchTestCase):
                 fixed_features=fixed_features,
                 acquisition_function=acqf,
                 initial_conditions=initial_conditions,
+                d=initial_conditions.shape[-1],
                 lower_bounds=lower_bounds,
                 upper_bounds=upper_bounds,
                 inequality_constraints=inequality_constraints,

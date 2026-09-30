@@ -8,25 +8,31 @@ r"""Assorted helper methods and objects for working with BoTorch models."""
 
 from __future__ import annotations
 
+import json
 import warnings
+from collections.abc import Iterator
 from contextlib import contextmanager, ExitStack
-from typing import Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 from botorch import settings
 from botorch.exceptions import InputDataError, InputDataWarning
 from botorch.settings import _Flag
 from gpytorch import settings as gpt_settings
+from gpytorch.likelihoods.gaussian_likelihood import FixedNoiseGaussianLikelihood
 from gpytorch.module import Module
 from torch import Tensor
 
+if TYPE_CHECKING:
+    from botorch.models.gpytorch import GPyTorchModel
 
-def _make_X_full(X: Tensor, output_indices: List[int], tf: int) -> Tensor:
+
+def _make_X_full(X: Tensor, output_indices: list[int], tf: int) -> Tensor:
     r"""Helper to construct input tensor with task indices.
 
     Args:
         X: The raw input tensor (without task information).
-        output_indices: The output indices to generate (passed in via `posterior`).
+        output_indices: The output indices to generate (passed in via ``posterior``).
         tf: The task feature index.
 
     Returns:
@@ -48,8 +54,8 @@ def multioutput_to_batch_mode_transform(
     train_X: Tensor,
     train_Y: Tensor,
     num_outputs: int,
-    train_Yvar: Optional[Tensor] = None,
-) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
+    train_Yvar: Tensor | None = None,
+) -> tuple[Tensor, Tensor, Tensor | None]:
     r"""Transforms training inputs for a multi-output model.
 
     Used for multi-output models that internally are represented by a
@@ -57,48 +63,48 @@ def multioutput_to_batch_mode_transform(
     independent batch.
 
     Args:
-        train_X: A `n x d` or `input_batch_shape x n x d` (batch mode) tensor of
+        train_X: A ``n x d`` or ``input_batch_shape x n x d`` (batch mode) tensor of
             training features.
-        train_Y: A `n x m` or `target_batch_shape x n x m` (batch mode) tensor of
+        train_Y: A ``n x m`` or ``target_batch_shape x n x m`` (batch mode) tensor of
             training observations.
         num_outputs: number of outputs
-        train_Yvar: A `n x m` or `target_batch_shape x n x m` tensor of observed
+        train_Yvar: A ``n x m`` or ``target_batch_shape x n x m`` tensor of observed
             measurement noise.
 
     Returns:
         3-element tuple containing
 
-        - A `input_batch_shape x m x n x d` tensor of training features.
-        - A `target_batch_shape x m x n` tensor of training observations.
-        - A `target_batch_shape x m x n` tensor observed measurement noise.
+        - A ``input_batch_shape x m x n x d`` tensor of training features.
+        - A ``target_batch_shape x m x n`` tensor of training observations.
+        - A ``target_batch_shape x m x n`` tensor observed measurement noise.
     """
-    # make train_Y `batch_shape x m x n`
+    # make train_Y ``batch_shape x m x n``
     train_Y = train_Y.transpose(-1, -2)
-    # expand train_X to `batch_shape x m x n x d`
+    # expand train_X to ``batch_shape x m x n x d``
     train_X = train_X.unsqueeze(-3).expand(
         train_X.shape[:-2] + torch.Size([num_outputs]) + train_X.shape[-2:]
     )
     if train_Yvar is not None:
-        # make train_Yvar `batch_shape x m x n`
+        # make train_Yvar ``batch_shape x m x n``
         train_Yvar = train_Yvar.transpose(-1, -2)
     return train_X, train_Y, train_Yvar
 
 
-def add_output_dim(X: Tensor, original_batch_shape: torch.Size) -> Tuple[Tensor, int]:
+def add_output_dim(X: Tensor, original_batch_shape: torch.Size) -> tuple[Tensor, int]:
     r"""Insert the output dimension at the correct location.
 
     The trailing batch dimensions of X must match the original batch dimensions
     of the training inputs, but can also include extra batch dimensions.
 
     Args:
-        X: A `(new_batch_shape) x (original_batch_shape) x n x d` tensor of
+        X: A ``(new_batch_shape) x (original_batch_shape) x n x d`` tensor of
             features.
         original_batch_shape: the batch shape of the model's training inputs.
 
     Returns:
         2-element tuple containing
 
-        - A `(new_batch_shape) x (original_batch_shape) x m x n x d` tensor of
+        - A ``(new_batch_shape) x (original_batch_shape) x m x n x d`` tensor of
             features.
         - The index corresponding to the output dimension.
     """
@@ -114,7 +120,7 @@ def add_output_dim(X: Tensor, original_batch_shape: torch.Size) -> Tuple[Tensor,
                 f"batch dimensions of the training inputs. Got {X.shape=} "
                 f"and {original_batch_shape=}."
             )
-    # insert `m` dimension
+    # insert ``m`` dimension
     X = X.unsqueeze(-3)
     output_dim_idx = max(len(original_batch_shape), len(X_batch_shape))
     return X, output_dim_idx
@@ -123,7 +129,7 @@ def add_output_dim(X: Tensor, original_batch_shape: torch.Size) -> Tuple[Tensor,
 def check_no_nans(Z: Tensor) -> None:
     r"""Check that tensor does not contain NaN values.
 
-    Raises an InputDataError if `Z` contains NaN values.
+    Raises an InputDataError if ``Z`` contains NaN values.
 
     Args:
         Z: The input tensor.
@@ -137,16 +143,16 @@ def check_min_max_scaling(
     strict: bool = False,
     atol: float = 1e-2,
     raise_on_fail: bool = False,
-    ignore_dims: Optional[List[int]] = None,
+    ignore_dims: list[int] | None = None,
 ) -> None:
     r"""Check that tensor is normalized to the unit cube.
 
     Args:
-        X: A `batch_shape x n x d` input tensor. Typically the training inputs
+        X: A ``batch_shape x n x d`` input tensor. Typically the training inputs
             of a model.
-        strict: If True, require `X` to be scaled to the unit cube (rather than
+        strict: If True, require ``X`` to be scaled to the unit cube (rather than
             just to be contained within the unit cube).
-        atol: The tolerance for the boundary check. Only used if `strict=True`.
+        atol: The tolerance for the boundary check. Only used if ``strict=True``.
         raise_on_fail: If True, raise an exception instead of a warning.
         ignore_dims: Subset of dimensions where the min-max scaling check is omitted.
     """
@@ -165,8 +171,10 @@ def check_min_max_scaling(
         if torch.any(Xmin < -atol) or torch.any(Xmax > 1 + atol):
             msg = "contained"
         if msg is not None:
+            # NOTE: If you update this message, update the warning filters as well.
+            # See https://github.com/meta-pytorch/botorch/pull/2508.
             msg = (
-                f"Input data is not {msg} to the unit cube. "
+                f"Data (input features) is not {msg} to the unit cube. "
                 "Please consider min-max scaling the input data."
             )
             if raise_on_fail:
@@ -183,9 +191,9 @@ def check_standardization(
     r"""Check that tensor is standardized (zero mean, unit variance).
 
     Args:
-        Y: The input tensor of shape `batch_shape x n x m`. Typically the
+        Y: The input tensor of shape ``batch_shape x n x m``. Typically the
             train targets of a model. Standardization is checked across the
-            `n`-dimension.
+            ``n``-dimension.
         atol_mean: The tolerance for the mean check.
         atol_std: The tolerance for the std check.
         raise_on_fail: If True, raise an exception instead of a warning.
@@ -195,9 +203,11 @@ def check_standardization(
         mean_not_zero = torch.abs(Ymean).max() > atol_mean
         if Y.shape[-2] <= 1:
             if mean_not_zero:
+                # NOTE: If you update this message, update the warning filters as well.
+                # See https://github.com/meta-pytorch/botorch/pull/2508.
                 msg = (
-                    f"Data is not standardized (mean = {Ymean}). "
-                    "Please consider scaling the input to zero mean and unit variance."
+                    f"Data (outcome observations) is not standardized (mean = {Ymean})."
+                    " Please consider scaling the input to zero mean and unit variance."
                 )
                 if raise_on_fail:
                     raise InputDataError(msg)
@@ -206,8 +216,11 @@ def check_standardization(
             Ystd = torch.std(Y, dim=-2)
             std_not_one = torch.abs(Ystd - 1).max() > atol_std
             if mean_not_zero or std_not_one:
+                # NOTE: If you update this message, update the warning filters as well.
+                # See https://github.com/meta-pytorch/botorch/pull/2508.
                 msg = (
-                    f"Data is not standardized (std = {Ystd}, mean = {Ymean}). "
+                    "Data (outcome observations) is not standardized "
+                    f"(std = {Ystd}, mean = {Ymean})."
                     "Please consider scaling the input to zero mean and unit variance."
                 )
                 if raise_on_fail:
@@ -218,33 +231,38 @@ def check_standardization(
 def validate_input_scaling(
     train_X: Tensor,
     train_Y: Tensor,
-    train_Yvar: Optional[Tensor] = None,
+    train_Yvar: Tensor | None = None,
     raise_on_fail: bool = False,
-    ignore_X_dims: Optional[List[int]] = None,
+    ignore_X_dims: list[int] | None = None,
+    check_nans_only: bool = False,
 ) -> None:
     r"""Helper function to validate input data to models.
 
     Args:
-        train_X: A `n x d` or `batch_shape x n x d` (batch mode) tensor of
+        train_X: A ``n x d`` or ``batch_shape x n x d`` (batch mode) tensor of
             training features.
-        train_Y: A `n x m` or `batch_shape x n x m` (batch mode) tensor of
+        train_Y: A ``n x m`` or ``batch_shape x n x m`` (batch mode) tensor of
             training observations.
-        train_Yvar: A `batch_shape x n x m` or `batch_shape x n x m` (batch mode)
+        train_Yvar: A ``batch_shape x n x m`` or ``batch_shape x n x m`` (batch mode)
             tensor of observed measurement noise.
         raise_on_fail: If True, raise an error instead of emitting a warning
             (only for normalization/standardization checks, an error is always
             raised if NaN values are present).
-        ignore_X_dims: For this subset of dimensions from `{1, ..., d}`, ignore the
+        ignore_X_dims: For this subset of dimensions from ``{1, ..., d}``, ignore the
             min-max scaling check.
+        check_nans_only: If True, only check for NaN values. Skips min-max scaling
+            and standardization checks. This is used when the model is provided
+            with a custom covariance module, to avoid potentially irrelevant
+            warnings.
 
     This function is typically called inside the constructor of standard BoTorch
     models. It validates the following:
     (i) none of the inputs contain NaN values
-    (ii) the training data (`train_X`) is normalized to the unit cube for all
-    dimensions except those in `ignore_X_dims`.
-    (iii) the training targets (`train_Y`) are standardized (zero mean, unit var)
+    (ii) the training data (``train_X``) is normalized to the unit cube for all
+    dimensions except those in ``ignore_X_dims``.
+    (iii) the training targets (``train_Y``) are standardized (zero mean, unit var)
     No checks (other than the NaN check) are performed for observed variances
-    (`train_Yvar`) at this point.
+    (``train_Yvar``) at this point.
     """
     if settings.validate_input_scaling.off():
         return
@@ -254,13 +272,14 @@ def validate_input_scaling(
         check_no_nans(train_Yvar)
         if torch.any(train_Yvar < 0):
             raise InputDataError("Input data contains negative variances.")
-    check_min_max_scaling(
-        X=train_X, raise_on_fail=raise_on_fail, ignore_dims=ignore_X_dims
-    )
-    check_standardization(Y=train_Y, raise_on_fail=raise_on_fail)
+    if not check_nans_only:
+        check_min_max_scaling(
+            X=train_X, raise_on_fail=raise_on_fail, ignore_dims=ignore_X_dims
+        )
+        check_standardization(Y=train_Y, raise_on_fail=raise_on_fail)
 
 
-def mod_batch_shape(module: Module, names: List[str], b: int) -> None:
+def mod_batch_shape(module: Module, names: list[str], b: int) -> None:
     r"""Recursive helper to modify gpytorch modules' batch shape attribute.
 
     Modifies the module in-place.
@@ -268,9 +287,9 @@ def mod_batch_shape(module: Module, names: List[str], b: int) -> None:
     Args:
         module: The module to be modified.
         names: The list of names to access the attribute. If the full name of
-            the module is `"module.sub_module.leaf_module"`, this will be
-            `["sub_module", "leaf_module"]`.
-        b: The new size of the last element of the module's `batch_shape`
+            the module is ``"module.sub_module.leaf_module"``, this will be
+            ``["sub_module", "leaf_module"]``.
+        b: The new size of the last element of the module's ``batch_shape``
             attribute.
     """
     if len(names) == 0:
@@ -300,9 +319,9 @@ def detect_duplicates(
     X: Tensor,
     rtol: float = 0,
     atol: float = 1e-8,
-) -> Iterator[Tuple[int, int]]:
-    """Returns an iterator over index pairs `(duplicate index, original index)` for all
-    duplicate entries of `X`. Supporting 2-d Tensor only.
+) -> Iterator[tuple[int, int]]:
+    """Returns an iterator over index pairs ``(duplicate index, original index)``
+    for all duplicate entries of ``X``. Supporting 2-d Tensor only.
 
     Args:
         X: the datapoints tensor with potential duplicated entries
@@ -332,7 +351,7 @@ def detect_duplicates(
 
 def consolidate_duplicates(
     X: Tensor, Y: Tensor, rtol: float = 0.0, atol: float = 1e-8
-) -> Tuple[Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, Tensor]:
     """Drop duplicated Xs and update the indices tensor Y accordingly.
     Supporting 2d Tensor only as in batch mode block design is not guaranteed.
 
@@ -387,6 +406,131 @@ def consolidate_duplicates(
 
 
 class fantasize(_Flag):
-    r"""A flag denoting whether we are currently in a `fantasize` context."""
+    r"""A flag denoting whether we are currently in a ``fantasize`` context."""
 
     _state: bool = False
+
+
+def get_task_value_remapping(
+    all_task_values: Tensor,
+    dtype: torch.dtype,
+) -> Tensor | None:
+    """Construct a mapping of task values to contiguous int-valued floats.
+
+    This function creates a mapping tensor that remaps task indices. All tasks
+    in ``all_task_values`` are mapped to contiguous integers starting from 0.
+    Task values not in ``all_task_values`` are mapped to NaN.
+
+    Args:
+        all_task_values: A sorted long-valued tensor of all possible task values
+            in the full task space.
+        dtype: The dtype of the model inputs (e.g. ``X``), which the new
+            task values should have mapped to (e.g. float, double).
+
+    Returns:
+        A tensor of shape ``all_task_values.max() + 1`` that maps task values
+        to new task values. The indexing operation ``mapper[task_value]``
+        will produce a tensor of new task values, of the same shape as
+        the original. All task values in ``all_task_values`` are mapped to
+        contiguous integers [0, 1, ..., n-1] where n is the number of tasks.
+        Task values not in ``all_task_values`` are mapped to NaN. Returns
+        ``None`` when ``all_task_values`` equals [0, 1, ..., n-1].
+    """
+    if dtype not in (torch.float, torch.double):
+        raise ValueError(f"dtype must be torch.float or torch.double, but got {dtype}.")
+    task_range = torch.arange(
+        len(all_task_values),
+        dtype=all_task_values.dtype,
+        device=all_task_values.device,
+    )
+    mapper = None
+
+    # if task values are not contiguous integers starting from 0,
+    # then map them to contiguous integers
+    if not torch.equal(task_range, all_task_values):
+        # Create a tensor that maps task values to new task values.
+        # The number of tasks should be small, so this should be quite efficient.
+        mapper = torch.full(
+            (int(all_task_values.max().item()) + 1,),
+            float("nan"),
+            dtype=dtype,
+            device=all_task_values.device,
+        )
+        mapper[all_task_values] = task_range.to(dtype=dtype)
+    return mapper
+
+
+def extract_targets_and_noise_single_output(model) -> tuple[Tensor, Tensor | None]:
+    r"""Extract targets and noise variance for single-output models (m=1).
+
+    Args:
+        model: A GPyTorch model.
+
+    Returns:
+        A tuple of (Y, Yvar) where Y and Yvar have shape ``batch_shape x n x 1``.
+    """
+    Y = model.train_targets.unsqueeze(-1)
+    Yvar = None
+    if isinstance(model.likelihood, FixedNoiseGaussianLikelihood):
+        Yvar = model.likelihood.noise_covar.noise.unsqueeze(-1)
+    return Y, Yvar
+
+
+def restore_targets_and_noise_single_output(
+    model, Y: Tensor, Yvar: Tensor | None, strict: bool
+) -> None:
+    r"""Restore targets and noise variance for single-output models (m=1).
+
+    Args:
+        model: A GPyTorch model.
+        Y: Targets tensor in shape ``batch_shape x n x 1``.
+        Yvar: Optional noise variance tensor in shape ``batch_shape x n x 1``.
+        strict: Whether to strictly enforce shape constraints.
+    """
+    Y = Y.squeeze(-1)
+    if Yvar is not None and isinstance(model.likelihood, FixedNoiseGaussianLikelihood):
+        Yvar = Yvar.squeeze(-1)
+        model.likelihood.noise_covar.noise = Yvar
+    model.set_train_data(targets=Y, strict=strict)
+
+
+def get_data_for_optimization_help(
+    model: GPyTorchModel,
+    path: str = "optimization_help_data.json",
+) -> None:
+    r"""Save model and training data as JSON for filing Optimization Help issues.
+
+    This function packages all the information needed to diagnose optimization
+    issues into a single JSON file that can be uploaded to a GitHub issue.
+
+    See the following tutorial for an example of how to use this file to get
+    help with optimization:
+    https://github.com/meta-pytorch/botorch/blob/main/tutorials/optimization_issue_diagnostics/optimization_issue_diagnostics.ipynb
+
+    Args:
+        model: A BoTorch model with training data.
+        path: File path where the JSON data will be saved.
+            Defaults to "optimization_help_data.json".
+    """
+    train_X = model.train_inputs[0]
+    train_Y = model.train_targets
+
+    if train_Y.ndim == 1:
+        train_Y = train_Y.unsqueeze(-1)
+
+    dtype = str(train_X.dtype).replace("torch.", "")
+
+    state_dict = {
+        key: tensor.detach().cpu().tolist()
+        for key, tensor in model.state_dict().items()
+    }
+
+    data = {
+        "dtype": dtype,
+        "train_X": train_X.detach().cpu().tolist(),
+        "train_Y": train_Y.detach().cpu().tolist(),
+        "state_dict": state_dict,
+    }
+
+    with open(path, "w") as f:
+        json.dump(data, f)

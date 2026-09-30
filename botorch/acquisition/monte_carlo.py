@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from copy import deepcopy
 from functools import partial
-from typing import Callable, List, Optional, Protocol, Tuple, Union
+from typing import Protocol
 
 import torch
 from botorch.acquisition.acquisition import AcquisitionFunction, MCSamplerMixin
@@ -43,11 +44,13 @@ from botorch.acquisition.utils import (
     repeat_to_match_aug_dim,
 )
 from botorch.exceptions.errors import UnsupportedError
+from botorch.exceptions.warnings import legacy_ei_numerics_warning
 from botorch.models.model import Model
 from botorch.sampling.base import MCSampler
 from botorch.utils.objective import compute_smoothed_feasibility_indicator
 from botorch.utils.transforms import (
     concatenate_pending_points,
+    is_ensemble,
     match_batch_shape,
     t_batch_mode_transform,
 )
@@ -57,32 +60,30 @@ from torch import Tensor
 class MCAcquisitionFunction(AcquisitionFunction, MCSamplerMixin, ABC):
     r"""
     Abstract base class for Monte-Carlo based batch acquisition functions.
-
-    :meta private:
     """
 
     def __init__(
         self,
         model: Model,
-        sampler: Optional[MCSampler] = None,
-        objective: Optional[MCAcquisitionObjective] = None,
-        posterior_transform: Optional[PosteriorTransform] = None,
-        X_pending: Optional[Tensor] = None,
+        sampler: MCSampler | None = None,
+        objective: MCAcquisitionObjective | None = None,
+        posterior_transform: PosteriorTransform | None = None,
+        X_pending: Tensor | None = None,
     ) -> None:
         r"""
         Args:
             model: A fitted model.
             sampler: The sampler used to draw base samples. If not given,
                 a sampler is generated on the fly within the
-                `get_posterior_samples` method using
-                `botorch.sampling.get_sampler`.
+                ``get_posterior_samples`` method using
+                ``botorch.sampling.get_sampler``.
                 NOTE: For posteriors that do not support base samples,
                 a sampler compatible with intended use case must be provided.
-                See `ForkedRNGSampler` and `StochasticSampler` as examples.
+                See ``ForkedRNGSampler`` and ``StochasticSampler`` as examples.
             objective: The MCAcquisitionObjective under which the samples are
-                evaluated. Defaults to `IdentityMCObjective()`.
+                evaluated. Defaults to ``IdentityMCObjective()``.
             posterior_transform: A PosteriorTransform (optional).
-            X_pending: A `batch_shape, m x d`-dim Tensor of `m` design points
+            X_pending: A ``batch_shape, m x d``-dim Tensor of ``m`` design points
                 that have points that have been submitted for function evaluation
                 but have not yet been evaluated.
         """
@@ -105,16 +106,16 @@ class MCAcquisitionFunction(AcquisitionFunction, MCSamplerMixin, ABC):
         self.objective: MCAcquisitionObjective = objective
         self.set_X_pending(X_pending)
 
-    def _get_samples_and_objectives(self, X: Tensor) -> Tuple[Tensor, Tensor]:
+    def _get_samples_and_objectives(self, X: Tensor) -> tuple[Tensor, Tensor]:
         """Computes posterior samples and objective values at input X.
 
         Args:
-            X: A `batch_shape x q x d`-dim Tensor of model inputs.
+            X: A ``batch_shape x q x d``-dim Tensor of model inputs.
 
         Returns:
-            A two-tuple `(samples, obj)`, where `samples` is a tensor of posterior
-            samples with shape `sample_shape x batch_shape x q x m`, and `obj` is a
-            tensor of MC objective values with shape `sample_shape x batch_shape x q`.
+            A two-tuple ``(samples, obj)``, where ``samples`` is a tensor of posterior
+            samples with shape ``sample_shape x batch_shape x q x m``, and ``obj`` is a
+            tensor of MC objective values with shape ``sample_shape x batch_shape x q``.
         """
         posterior = self.model.posterior(
             X=X, posterior_transform=self.posterior_transform
@@ -125,11 +126,11 @@ class MCAcquisitionFunction(AcquisitionFunction, MCSamplerMixin, ABC):
 
     @abstractmethod
     def forward(self, X: Tensor) -> Tensor:
-        r"""Takes in a `batch_shape x q x d` X Tensor of t-batches with `q` `d`-dim
-        design points each, and returns a Tensor with shape `batch_shape'`, where
-        `batch_shape'` is the broadcasted batch shape of model and input `X`. Should
-        utilize the result of `set_X_pending` as needed to account for pending function
-        evaluations.
+        r"""Takes in a ``batch_shape x q x d`` X Tensor of t-batches with ``q``
+        ``d``-dim design points each, and returns a Tensor with shape
+        ``batch_shape'``, where ``batch_shape'`` is the broadcasted batch shape of
+        model and input ``X``. Should utilize the result of ``set_X_pending`` as
+        needed to account for pending function evaluations.
         """
         pass  # pragma: no cover
 
@@ -146,34 +147,39 @@ class SampleReducingMCAcquisitionFunction(MCAcquisitionFunction):
     r"""MC-based batch acquisition function that reduces across samples and implements
     a general treatment of outcome constraints.
 
-    This class's `forward` computes the - possibly constrained - acquisition value by
-    (1) computing the unconstrained utility for each MC sample using `_sample_forward`,
-    (2) weighing the utility values by the constraint indicator per MC sample, and
-    (3) reducing (e.g. averaging) the weighted utility values over the MC dimension.
+    This class's ``forward`` computes the - possibly constrained - acquisition
+    value by (1) computing the unconstrained utility for each MC sample using
+    ``_sample_forward``, (2) weighing the utility values by the constraint
+    indicator per MC sample, and (3) reducing (e.g. averaging) the weighted
+    utility values over the MC dimension.
 
-    NOTE: Do *NOT* override the `forward` method, unless you have thought about it well.
+    NOTE: Do *NOT* override the ``forward`` method, unless you have thought
+    about it well.
 
-    `forward` is implemented generically to incorporate constraints in a principled way,
-    and takes care of reducing over the Monte Carlo and batch dimensions via the
-    `sample_reduction` and `q_reduction` arguments, which default to `torch.mean` and
-    `torch.max`, respectively.
+    ``forward`` is implemented generically to incorporate constraints in a
+    principled way, and takes care of reducing over the Monte Carlo and batch
+    dimensions via the ``sample_reduction`` and ``q_reduction`` arguments, which
+    default to ``torch.mean`` and ``torch.max``, respectively.
 
-    In order to implement a custom SampleReducingMCAcquisitionFunction, we only need to
-    implement the `_sample_forward(obj: Tensor) -> Tensor` method, which maps objective
-    samples to acquisition utility values without reducing the Monte Carlo and batch
-    (i.e. q) dimensions (see details in the docstring of `_sample_forward`).
+    In order to implement a custom SampleReducingMCAcquisitionFunction, we only
+    need to implement the ``_sample_forward(obj: Tensor) -> Tensor`` method,
+    which maps objective samples to acquisition utility values without reducing
+    the Monte Carlo and batch (i.e. q) dimensions (see details in the docstring
+    of ``_sample_forward``).
 
     A note on design choices:
 
-    The primary purpose of `SampleReducingMCAcquisitionFunction`is to support outcome
-    constraints. On the surface, designing a wrapper `ConstrainedMCAcquisitionFunction`
-    could be an elegant solution to this end, but it would still require the acquisition
-    functions to implement a `_sample_forward` method to weigh acquisition utilities at
-    the sample level. Further, `qNoisyExpectedImprovement` is a special case that is
-    hard to encompass in this pattern, since it requires the computation of the best
-    *feasible* objective, which requires access to the constraint functions. However,
-    if the constraints are stored in a wrapper class, they will be inaccessible to the
-    forward pass. These problems are circumvented by the design of this class.
+    The primary purpose of ``SampleReducingMCAcquisitionFunction``is to support
+    outcome constraints. On the surface, designing a wrapper
+    ``ConstrainedMCAcquisitionFunction`` could be an elegant solution to this
+    end, but it would still require the acquisition functions to implement a
+    ``_sample_forward`` method to weigh acquisition utilities at the sample
+    level. Further, ``qNoisyExpectedImprovement`` is a special case that is
+    hard to encompass in this pattern, since it requires the computation of the
+    best *feasible* objective, which requires access to the constraint
+    functions. However, if the constraints are stored in a wrapper class, they
+    will be inaccessible to the forward pass. These problems are circumvented by
+    the design of this class.
     """
 
     _log: bool = False  # whether the acquisition utilities are in log-space
@@ -181,15 +187,15 @@ class SampleReducingMCAcquisitionFunction(MCAcquisitionFunction):
     def __init__(
         self,
         model: Model,
-        sampler: Optional[MCSampler] = None,
-        objective: Optional[MCAcquisitionObjective] = None,
-        posterior_transform: Optional[PosteriorTransform] = None,
-        X_pending: Optional[Tensor] = None,
+        sampler: MCSampler | None = None,
+        objective: MCAcquisitionObjective | None = None,
+        posterior_transform: PosteriorTransform | None = None,
+        X_pending: Tensor | None = None,
         sample_reduction: SampleReductionProtocol = torch.mean,
         q_reduction: SampleReductionProtocol = torch.amax,
-        constraints: Optional[List[Callable[[Tensor], Tensor]]] = None,
-        eta: Union[Tensor, float] = 1e-3,
-        fat: bool = False,
+        constraints: list[Callable[[Tensor], Tensor]] | None = None,
+        eta: Tensor | float = 1e-3,
+        fat: list[bool | None] | bool = False,
     ):
         r"""Constructor of SampleReducingMCAcquisitionFunction.
 
@@ -197,38 +203,43 @@ class SampleReducingMCAcquisitionFunction(MCAcquisitionFunction):
             model: A fitted model.
             sampler: The sampler used to draw base samples. If not given, a
                 sampler is generated on the fly within the
-                `get_posterior_samples` method using
-                `botorch.sampling.get_sampler`.
+                ``get_posterior_samples`` method using
+                ``botorch.sampling.get_sampler``.
                 NOTE: For posteriors that do not support base samples,
                 a sampler compatible with intended use case must be provided.
-                See `ForkedRNGSampler` and `StochasticSampler` as examples.
+                See ``ForkedRNGSampler`` and ``StochasticSampler`` as examples.
             objective: The MCAcquisitionObjective under which the samples are
-                evaluated. Defaults to `IdentityMCObjective()`.
-                NOTE: `ConstrainedMCObjective` for outcome constraints is deprecated in
-                favor of passing the `constraints` directly to this constructor.
-            posterior_transform: A `PosteriorTransform` (optional).
-            X_pending: A `batch_shape, m x d`-dim Tensor of `m` design points
+                evaluated. Defaults to ``IdentityMCObjective()``.
+                NOTE: ``ConstrainedMCObjective`` for outcome constraints is
+                deprecated in favor of passing the ``constraints`` directly to this
+                constructor.
+            posterior_transform: A ``PosteriorTransform`` (optional).
+            X_pending: A ``batch_shape, m x d``-dim Tensor of ``m`` design points
                 that have points that have been submitted for function evaluation
                 but have not yet been evaluated.
-            sample_reduction: A callable that takes in a `sample_shape x batch_shape`
-                Tensor of acquisition utility values, a keyword-argument `dim` that
-                specifies the sample dimensions to reduce over, and returns a
-                `batch_shape`-dim Tensor of acquisition values.
-            q_reduction: A callable that takes in a `sample_shape x batch_shape x q`
-                Tensor of acquisition utility values, a keyword-argument `dim` that
-                specifies the q dimension to reduce over (i.e. -1), and returns a
-                `sample_shape x batch_shape`-dim Tensor of acquisition values.
-            constraints: A list of constraint callables which map a Tensor of posterior
-                samples of dimension `sample_shape x batch-shape x q x m`-dim to a
-                `sample_shape x batch-shape x q`-dim Tensor. The associated constraints
-                are considered satisfied if the output is less than zero.
-                NOTE: Constraint-weighting is only compatible with non-negative
-                acquistion utilities, e.g. all improvement-based acquisition functions.
+            sample_reduction: A callable that takes in a ``sample_shape x
+                batch_shape`` Tensor of acquisition utility values, a keyword-argument
+                ``dim`` that specifies the sample dimensions to reduce over, and
+                returns a ``batch_shape``-dim Tensor of acquisition values.
+            q_reduction: A callable that takes in a ``sample_shape x batch_shape
+                x q`` Tensor of acquisition utility values, a keyword-argument ``dim``
+                that specifies the q dimension to reduce over (i.e. -1), and returns
+                a ``sample_shape x batch_shape``-dim Tensor of acquisition values.
+            constraints: A list of constraint callables which map a Tensor of
+                posterior samples of dimension ``sample_shape x batch-shape x q x
+                m``-dim to a ``sample_shape x batch-shape x q``-dim Tensor. The
+                associated constraints are considered satisfied if the output is less
+                than zero. NOTE: Constraint-weighting is only compatible with
+                non-negative acquistion utilities, e.g. all improvement-based
+                acquisition functions.
             eta: Temperature parameter(s) governing the smoothness of the sigmoid
                 approximation to the constraint indicators. For more details, on this
-                parameter, see the docs of `compute_smoothed_feasibility_indicator`.
-            fat: Wether to apply a fat-tailed smooth approximation to the feasibility
-                indicator or the canonical sigmoid approximation.
+                parameter, see the docs of
+                ``compute_smoothed_feasibility_indicator``.
+            fat: Whether to apply a fat-tailed smooth approximation to the feasibility
+                indicator or the canonical sigmoid approximation. For more details,
+                on this parameter, see the docs of
+                ``compute_smoothed_feasibility_indicator``.
         """
         if constraints is not None and isinstance(objective, ConstrainedMCObjective):
             raise ValueError(
@@ -245,6 +256,9 @@ class SampleReducingMCAcquisitionFunction(MCAcquisitionFunction):
         )
         # Shall the need arise, sample_dim could be exposed in the constructor.
         sample_dim = tuple(range(len(self.sample_shape)))
+        # the ensemble dimension is assumed to be the last dimension
+        if is_ensemble(model):
+            sample_dim = sample_dim + (-1,)
         self._sample_reduction = partial(sample_reduction, dim=sample_dim)
         self._q_reduction = partial(q_reduction, dim=-1)
         self._constraints = constraints
@@ -254,22 +268,23 @@ class SampleReducingMCAcquisitionFunction(MCAcquisitionFunction):
     @concatenate_pending_points
     @t_batch_mode_transform()
     def forward(self, X: Tensor) -> Tensor:
-        r"""Computes the acquisition value associated with the input `X`. Weighs the
-        acquisition utility values by smoothed constraint indicators if `constraints`
-        was passed to the constructor of the class. Applies `self.sample_reduction` and
-        `self.q_reduction` to reduce over the Monte Carlo and batch (q) dimensions.
+        r"""Computes the acquisition value associated with the input ``X``. Weighs
+        the acquisition utility values by smoothed constraint indicators if
+        ``constraints`` was passed to the constructor of the class. Applies
+        ``self.sample_reduction`` and ``self.q_reduction`` to reduce over the Monte
+        Carlo and batch (q) dimensions.
 
-        NOTE: Do *NOT* override the `forward` method for a custom acquisition function.
-        Instead, implement the `_sample_forward` method. See the docstring of this class
-        for details.
+        NOTE: Do *NOT* override the ``forward`` method for a custom acquisition
+        function. Instead, implement the ``_sample_forward`` method. See the
+        docstring of this class for details.
 
         Args:
-            X: A `batch_shape x q x d` Tensor of t-batches with `q` `d`-dim
+            X: A ``batch_shape x q x d`` Tensor of t-batches with ``q`` ``d``-dim
                 design points each.
 
         Returns:
-            A Tensor with shape `batch_shape'`, where `batch_shape'` is the broadcasted
-            batch shape of model and input `X`.
+            A Tensor with shape ``batch_shape'``, where ``batch_shape'`` is the
+            broadcasted batch shape of model and input ``X``.
         """
         non_reduced_acqval = self._non_reduced_forward(X=X)
         return self._sample_reduction(self._q_reduction(non_reduced_acqval))
@@ -278,28 +293,29 @@ class SampleReducingMCAcquisitionFunction(MCAcquisitionFunction):
         """Compute the constrained acquisition values at the MC-sample, q level.
 
         Args:
-            X: A `batch_shape x q x d` Tensor of t-batches with `q` `d`-dim
+            X: A ``batch_shape x q x d`` Tensor of t-batches with ``q`` ``d``-dim
                 design points each.
 
         Returns:
-            A Tensor with shape `sample_sample x batch_shape x q`.
+            A Tensor with shape ``sample_sample x batch_shape x q``.
         """
         samples, obj = self._get_samples_and_objectives(X)
         samples = repeat_to_match_aug_dim(target_tensor=samples, reference_tensor=obj)
-        acqval = self._sample_forward(obj)  # `sample_sample x batch_shape x q`
+        acqval = self._sample_forward(obj)  # ``sample_sample x batch_shape x q``
         return self._apply_constraints(acqval=acqval, samples=samples)
 
     @abstractmethod
     def _sample_forward(self, obj: Tensor) -> Tensor:
         """Evaluates the acquisition utility per MC sample based on objective value obj.
-        Should utilize the result of `set_X_pending` as needed to account for pending
+        Should utilize the result of ``set_X_pending`` as needed to account for pending
         function evaluations.
 
         Args:
-            obj: A `sample_shape x batch_shape x q`-dim Tensor of MC objective values.
+            obj: A ``sample_shape x batch_shape x q``-dim Tensor of MC objective values.
 
         Returns:
-            A `sample_shape x batch_shape x q`-dim Tensor of acquisition utility values.
+            A ``sample_shape x batch_shape x q``-dim Tensor of acquisition
+                utility values.
         """
         pass  # pragma: no cover
 
@@ -307,12 +323,13 @@ class SampleReducingMCAcquisitionFunction(MCAcquisitionFunction):
         """Multiplies the acquisition utility by constraint indicators.
 
         Args:
-            acqval: `sample_shape x batch_shape x q`-dim acquisition utility values.
-            samples: `sample_shape x batch_shape x q x m`-dim posterior samples.
+            acqval: ``sample_shape x batch_shape x q``-dim acquisition utility values.
+            samples: ``sample_shape x batch_shape x q x m``-dim posterior samples.
 
         Returns:
-            A `sample_shape x batch_shape x q`-dim Tensor of acquisition utility values
-                multiplied by a smoothed constraint indicator per sample.
+            A ``sample_shape x batch_shape x q``-dim Tensor of acquisition
+                utility values multiplied by a smoothed constraint indicator
+                per sample.
         """
         if self._constraints is not None:
             if not self._log and (acqval < 0).any():
@@ -340,7 +357,7 @@ class qExpectedImprovement(SampleReducingMCAcquisitionFunction):
     (3) maximizing over q
     (4) averaging over the samples
 
-    `qEI(X) = E(max(max Y - best_f, 0)), Y ~ f(X), where X = (x_1,...,x_q)`
+    ``qEI(X) = E(max(max Y - best_f, 0)), Y ~ f(X), where X = (x_1,...,x_q)``
 
     Example:
         >>> model = SingleTaskGP(train_X, train_Y)
@@ -348,45 +365,54 @@ class qExpectedImprovement(SampleReducingMCAcquisitionFunction):
         >>> sampler = SobolQMCNormalSampler(1024)
         >>> qEI = qExpectedImprovement(model, best_f, sampler)
         >>> qei = qEI(test_X)
+
+    NOTE: It is strongly recommended to use ``qLogExpectedImprovement`` instead
+    of regular ``qEI``, as it can lead to substantially improved BO performance through
+    improved numerics. See https://arxiv.org/abs/2310.20708 for details.
     """
 
     def __init__(
         self,
         model: Model,
-        best_f: Union[float, Tensor],
-        sampler: Optional[MCSampler] = None,
-        objective: Optional[MCAcquisitionObjective] = None,
-        posterior_transform: Optional[PosteriorTransform] = None,
-        X_pending: Optional[Tensor] = None,
-        constraints: Optional[List[Callable[[Tensor], Tensor]]] = None,
-        eta: Union[Tensor, float] = 1e-3,
+        best_f: float | Tensor,
+        sampler: MCSampler | None = None,
+        objective: MCAcquisitionObjective | None = None,
+        posterior_transform: PosteriorTransform | None = None,
+        X_pending: Tensor | None = None,
+        constraints: list[Callable[[Tensor], Tensor]] | None = None,
+        eta: Tensor | float = 1e-3,
     ) -> None:
         r"""q-Expected Improvement.
 
         Args:
             model: A fitted model.
-            best_f: The best objective value observed so far (assumed noiseless). Can be
-                a scalar, or a `batch_shape`-dim tensor. In case of a batched model, the
-                tensor can specify different values for each element of the batch.
-            sampler: The sampler used to draw base samples. See `MCAcquisitionFunction`
-                more details.
+            best_f: The best objective value observed so far (assumed
+                noiseless). Can be a scalar, or a ``batch_shape``-dim tensor.
+                In case of a batched model, the tensor can specify different
+                values for each element of the batch.
+            sampler: The sampler used to draw base samples. See
+                ``MCAcquisitionFunction`` more details.
             objective: The MCAcquisitionObjective under which the samples are evaluated.
-                Defaults to `IdentityMCObjective()`.
-                NOTE: `ConstrainedMCObjective` for outcome constraints is deprecated in
-                favor of passing the `constraints` directly to this constructor.
+                Defaults to ``IdentityMCObjective()``.
+                NOTE: ``ConstrainedMCObjective`` for outcome constraints is
+                deprecated in favor of passing the ``constraints`` directly to
+                this constructor.
             posterior_transform: A PosteriorTransform (optional).
-            X_pending:  A `m x d`-dim Tensor of `m` design points that have been
+            X_pending:  A ``m x d``-dim Tensor of ``m`` design points that have been
                 submitted for function evaluation but have not yet been evaluated.
                 Concatenated into X upon forward call. Copied and set to have no
                 gradient.
-            constraints: A list of constraint callables which map a Tensor of posterior
-                samples of dimension `sample_shape x batch-shape x q x m`-dim to a
-                `sample_shape x batch-shape x q`-dim Tensor. The associated constraints
-                are considered satisfied if the output is less than zero.
-            eta: Temperature parameter(s) governing the smoothness of the sigmoid
-                approximation to the constraint indicators. For more details, on this
-                parameter, see the docs of `compute_smoothed_feasibility_indicator`.
+            constraints: A list of constraint callables which map a Tensor of
+                posterior samples of dimension ``sample_shape x batch-shape x q
+                x m``-dim to a ``sample_shape x batch-shape x q``-dim Tensor.
+                The associated constraints are considered satisfied if the output
+                is less than zero.
+            eta: Temperature parameter(s) governing the smoothness of the
+                sigmoid approximation to the constraint indicators. For more
+                details, on this parameter, see the docs of
+                ``compute_smoothed_feasibility_indicator``.
         """
+        legacy_ei_numerics_warning(legacy_name=type(self).__name__)
         super().__init__(
             model=model,
             sampler=sampler,
@@ -396,16 +422,17 @@ class qExpectedImprovement(SampleReducingMCAcquisitionFunction):
             constraints=constraints,
             eta=eta,
         )
-        self.register_buffer("best_f", torch.as_tensor(best_f, dtype=float))
+        self.register_buffer("best_f", torch.as_tensor(best_f))
 
     def _sample_forward(self, obj: Tensor) -> Tensor:
-        r"""Evaluate qExpectedImprovement per sample on the candidate set `X`.
+        r"""Evaluate qExpectedImprovement per sample on the candidate set ``X``.
 
         Args:
-            obj: A `sample_shape x batch_shape x q`-dim Tensor of MC objective values.
+            obj: A ``sample_shape x batch_shape x q``-dim Tensor of MC objective values.
 
         Returns:
-            A `sample_shape x batch_shape x q`-dim Tensor of improvement utility values.
+            A ``sample_shape x batch_shape x q``-dim Tensor of improvement
+                utility values.
         """
         return (obj - self.best_f.unsqueeze(-1).to(obj)).clamp_min(0)
 
@@ -415,68 +442,75 @@ class qNoisyExpectedImprovement(
 ):
     r"""MC-based batch Noisy Expected Improvement.
 
-    This function does not assume a `best_f` is known (which would require
+    This function does not assume a ``best_f`` is known (which would require
     noiseless observations). Instead, it uses samples from the joint posterior
-    over the `q` test points and previously observed points. The improvement
+    over the ``q`` test points and previously observed points. The improvement
     over previously observed points is computed for each sample and averaged.
 
-    `qNEI(X) = E(max(max Y - max Y_baseline, 0))`, where
-    `(Y, Y_baseline) ~ f((X, X_baseline)), X = (x_1,...,x_q)`
+    ``qNEI(X) = E(max(max Y - max Y_baseline, 0))``, where
+    ``(Y, Y_baseline) ~ f((X, X_baseline)), X = (x_1,...,x_q)``
 
     Example:
         >>> model = SingleTaskGP(train_X, train_Y)
         >>> sampler = SobolQMCNormalSampler(1024)
         >>> qNEI = qNoisyExpectedImprovement(model, train_X, sampler)
         >>> qnei = qNEI(test_X)
+
+    NOTE: It is strongly recommended to use ``qLogNoisyExpectedImprovement`` instead
+    of regular ``qNEI``, as it can lead to substantially improved BO performance through
+    improved numerics. See https://arxiv.org/abs/2310.20708 for details.
     """
 
     def __init__(
         self,
         model: Model,
         X_baseline: Tensor,
-        sampler: Optional[MCSampler] = None,
-        objective: Optional[MCAcquisitionObjective] = None,
-        posterior_transform: Optional[PosteriorTransform] = None,
-        X_pending: Optional[Tensor] = None,
+        sampler: MCSampler | None = None,
+        objective: MCAcquisitionObjective | None = None,
+        posterior_transform: PosteriorTransform | None = None,
+        X_pending: Tensor | None = None,
         prune_baseline: bool = True,
-        cache_root: bool = True,
-        constraints: Optional[List[Callable[[Tensor], Tensor]]] = None,
-        eta: Union[Tensor, float] = 1e-3,
-        marginalize_dim: Optional[int] = None,
+        cache_root: bool | None = None,
+        constraints: list[Callable[[Tensor], Tensor]] | None = None,
+        eta: Tensor | float = 1e-3,
+        marginalize_dim: int | None = None,
     ) -> None:
         r"""q-Noisy Expected Improvement.
 
         Args:
             model: A fitted model.
-            X_baseline: A `batch_shape x r x d`-dim Tensor of `r` design points
+            X_baseline: A ``batch_shape x r x d``-dim Tensor of ``r`` design points
                 that have already been observed. These points are considered as
                 the potential best design point.
-            sampler: The sampler used to draw base samples. See `MCAcquisitionFunction`
-                more details.
+            sampler: The sampler used to draw base samples. See
+                ``MCAcquisitionFunction`` more details.
             objective: The MCAcquisitionObjective under which the samples are
-                evaluated. Defaults to `IdentityMCObjective()`.
-                NOTE: `ConstrainedMCObjective` for outcome constraints is deprecated in
-                favor of passing the `constraints` directly to this constructor.
+                evaluated. Defaults to ``IdentityMCObjective()``.
+                NOTE: ``ConstrainedMCObjective`` for outcome constraints is
+                deprecated in favor of passing the ``constraints`` directly to
+                this constructor.
             posterior_transform: A PosteriorTransform (optional).
-            X_pending: A `batch_shape x m x d`-dim Tensor of `m` design points
+            X_pending: A ``batch_shape x m x d``-dim Tensor of ``m`` design points
                 that have points that have been submitted for function evaluation
-                but have not yet been evaluated. Concatenated into `X` upon
+                but have not yet been evaluated. Concatenated into ``X`` upon
                 forward call. Copied and set to have no gradient.
-            prune_baseline: If True, remove points in `X_baseline` that are
+            prune_baseline: If True, remove points in ``X_baseline`` that are
                 highly unlikely to be the best point. This can significantly
                 improve performance and is generally recommended. In order to
                 customize pruning parameters, instead manually call
-                `botorch.acquisition.utils.prune_inferior_points` on `X_baseline`
+                ``botorch.acquisition.utils.prune_inferior_points`` on ``X_baseline``
                 before instantiating the acquisition function.
             cache_root: A boolean indicating whether to cache the root
-                decomposition over `X_baseline` and use low-rank updates.
-            constraints: A list of constraint callables which map a Tensor of posterior
-                samples of dimension `sample_shape x batch-shape x q x m`-dim to a
-                `sample_shape x batch-shape x q`-dim Tensor. The associated constraints
-                are considered satisfied if the output is less than zero.
-            eta: Temperature parameter(s) governing the smoothness of the sigmoid
-                approximation to the constraint indicators. For more details, on this
-                parameter, see the docs of `compute_smoothed_feasibility_indicator`.
+                decomposition over ``X_baseline`` and use low-rank updates.
+            constraints: A list of constraint callables which map a Tensor of
+                posterior samples of dimension ``sample_shape x batch-shape x q
+                x m``-dim to a ``sample_shape x batch-shape x q``-dim Tensor.
+                The associated constraints are considered satisfied if the output
+                is less than zero.
+            eta: Temperature parameter(s) governing the smoothness of the
+                sigmoid approximation to the constraint indicators. For more
+                details, on this parameter, see the docs of
+                ``compute_smoothed_feasibility_indicator``.
             marginalize_dim: The dimension to marginalize over.
 
         TODO: similar to qNEHVI, when we are using sequential greedy candidate
@@ -484,6 +518,7 @@ class qNoisyExpectedImprovement(
         the incremental qNEI from the new point. This would greatly increase
         efficiency for large batches.
         """
+        legacy_ei_numerics_warning(legacy_name=type(self).__name__)
         super().__init__(
             model=model,
             sampler=sampler,
@@ -506,7 +541,7 @@ class qNoisyExpectedImprovement(
                 marginalize_dim=marginalize_dim,
             )
         self.register_buffer("X_baseline", X_baseline)
-        # registering buffers for _get_samples_and_objectives in the next `if` block
+        # registering buffers for _get_samples_and_objectives in the next ``if`` block
         self.register_buffer("baseline_samples", None)
         self.register_buffer("baseline_obj", None)
         if self._cache_root:
@@ -519,18 +554,18 @@ class qNoisyExpectedImprovement(
                 # Note: The root decomposition is cached in two different places. It
                 # may be confusing to have two different caches, but this is not
                 # trivial to change since each is needed for a different reason:
-                # - LinearOperator caching to `posterior.mvn` allows for reuse within
+                # - LinearOperator caching to ``posterior.mvn`` allows for reuse within
                 #  this function, which may be helpful if the same root decomposition
-                #  is produced by the calls to `self.base_sampler` and
-                #  `self._cache_root_decomposition`.
+                #  is produced by the calls to ``self.base_sampler`` and
+                #  ``self._cache_root_decomposition``.
                 # - self._baseline_L allows a root decomposition to be persisted outside
                 #   this method.
                 baseline_samples = self.get_posterior_samples(posterior)
                 baseline_obj = self.objective(baseline_samples, X=X_baseline)
 
-            # We make a copy here because we will write an attribute `base_samples`
-            # to `self.base_sampler.base_samples`, and we don't want to mutate
-            # `self.sampler`.
+            # We make a copy here because we will write an attribute ``base_samples``
+            # to ``self.base_sampler.base_samples``, and we don't want to mutate
+            # ``self.sampler``.
             self.base_sampler = deepcopy(self.sampler)
             self.baseline_samples = baseline_samples
             self.baseline_obj = baseline_obj
@@ -538,7 +573,7 @@ class qNoisyExpectedImprovement(
                 "_baseline_best_f",
                 self._compute_best_feasible_objective(
                     samples=baseline_samples, obj=baseline_obj
-                ),  # `sample_shape x batch_shape`-dim
+                ),  # ``sample_shape x batch_shape``-dim
             )
             self._baseline_L = self._compute_root_decomposition(posterior=posterior)
 
@@ -546,10 +581,10 @@ class qNoisyExpectedImprovement(
         """Computes the best (feasible) noisy objective value.
 
         Args:
-            obj: `sample_shape x batch_shape x q`-dim Tensor of objectives in forward.
+            obj: ``sample_shape x batch_shape x q``-dim Tensor of objectives in forward.
 
         Returns:
-            A `sample_shape x batch_shape`-dim Tensor of best feasible objectives.
+            A ``sample_shape x batch_shape``-dim Tensor of best feasible objectives.
         """
         if self._cache_root:
             val = self._baseline_best_f
@@ -562,33 +597,34 @@ class qNoisyExpectedImprovement(
         view_shape = torch.Size(
             [
                 *val.shape[:n_sample_dims],  # sample dimensions
-                *(1,) * (obj.ndim - val.ndim - 1),  # pad to match obj, without `q`-dim
+                *(1,)
+                * (obj.ndim - val.ndim - 1),  # pad to match obj, without ``q``-dim
                 *val.shape[n_sample_dims:],  # the rest
             ]
         )
-        return val.view(view_shape).to(obj)  # obj.shape[:-1], i.e. without `q`-dim`
+        return val.view(view_shape).to(obj)  # obj.shape[:-1], i.e. without ``q``-dim`
 
     def _sample_forward(self, obj: Tensor) -> Tensor:
-        """Evaluate qNoisyExpectedImprovement per objective value in `obj`.
+        """Evaluate qNoisyExpectedImprovement per objective value in ``obj``.
 
         Args:
-            obj: A `sample_shape x batch_shape x q`-dim Tensor of MC objective values.
+            obj: A ``sample_shape x batch_shape x q``-dim Tensor of MC objective values.
 
         Returns:
-            A `sample_shape x batch_shape x q`-dim Tensor of noisy improvement values.
+            A ``sample_shape x batch_shape x q``-dim Tensor of noisy improvement values.
         """
         return (obj - self.compute_best_f(obj).unsqueeze(-1)).clamp_min(0)
 
-    def _get_samples_and_objectives(self, X: Tensor) -> Tuple[Tensor, Tensor]:
+    def _get_samples_and_objectives(self, X: Tensor) -> tuple[Tensor, Tensor]:
         r"""Compute samples at new points, using the cached root decomposition.
 
         Args:
-            X: A `batch_shape x q x d`-dim tensor of inputs.
+            X: A ``batch_shape x q x d``-dim tensor of inputs.
 
         Returns:
-            A two-tuple `(samples, obj)`, where `samples` is a tensor of posterior
-            samples with shape `sample_shape x batch_shape x q x m`, and `obj` is a
-            tensor of MC objective values with shape `sample_shape x batch_shape x q`.
+            A two-tuple ``(samples, obj)``, where ``samples`` is a tensor of posterior
+            samples with shape ``sample_shape x batch_shape x q x m``, and ``obj`` is a
+            tensor of MC objective values with shape ``sample_shape x batch_shape x q``.
         """
         q = X.shape[-2]
         X_full = torch.cat([match_batch_shape(self.X_baseline, X), X], dim=-2)
@@ -601,7 +637,8 @@ class qNoisyExpectedImprovement(
             samples_full = super().get_posterior_samples(posterior)
             samples = samples_full[..., -q:, :]
             obj_full = self.objective(samples_full, X=X_full)
-            # assigning baseline buffers so `best_f` can be computed in _sample_forward
+            # assigning baseline buffers so ``best_f`` can be computed in
+            # _sample_forward
             self.baseline_obj, obj = obj_full[..., :-q], obj_full[..., -q:]
             self.baseline_samples = samples_full[..., :-q, :]
         else:
@@ -619,11 +656,11 @@ class qNoisyExpectedImprovement(
         r"""Computes best feasible objective value from samples.
 
         Args:
-            samples: `sample_shape x batch_shape x q x m`-dim posterior samples.
-            obj: A `sample_shape x batch_shape x q`-dim Tensor of MC objective values.
+            samples: ``sample_shape x batch_shape x q x m``-dim posterior samples.
+            obj: A ``sample_shape x batch_shape x q``-dim Tensor of MC objective values.
 
         Returns:
-            A `sample_shape x batch_shape`-dim Tensor of best feasible objectives.
+            A ``sample_shape x batch_shape``-dim Tensor of best feasible objectives.
         """
         return compute_best_feasible_objective(
             samples=samples,
@@ -643,9 +680,9 @@ class qProbabilityOfImprovement(SampleReducingMCAcquisitionFunction):
     value by sampling from the joint posterior distribution of the q-batch.
     MC-based estimates of a probability involves taking expectation of an
     indicator function; to support auto-differentiation, the indicator is
-    replaced with a sigmoid function with temperature parameter `tau`.
+    replaced with a sigmoid function with temperature parameter ``tau``.
 
-    `qPI(X) = P(max Y >= best_f), Y ~ f(X), X = (x_1,...,x_q)`
+    ``qPI(X) = P(max Y >= best_f), Y ~ f(X), X = (x_1,...,x_q)``
 
     Example:
         >>> model = SingleTaskGP(train_X, train_Y)
@@ -658,30 +695,32 @@ class qProbabilityOfImprovement(SampleReducingMCAcquisitionFunction):
     def __init__(
         self,
         model: Model,
-        best_f: Union[float, Tensor],
-        sampler: Optional[MCSampler] = None,
-        objective: Optional[MCAcquisitionObjective] = None,
-        posterior_transform: Optional[PosteriorTransform] = None,
-        X_pending: Optional[Tensor] = None,
+        best_f: float | Tensor,
+        sampler: MCSampler | None = None,
+        objective: MCAcquisitionObjective | None = None,
+        posterior_transform: PosteriorTransform | None = None,
+        X_pending: Tensor | None = None,
         tau: float = 1e-3,
-        constraints: Optional[List[Callable[[Tensor], Tensor]]] = None,
-        eta: Union[Tensor, float] = 1e-3,
+        constraints: list[Callable[[Tensor], Tensor]] | None = None,
+        eta: Tensor | float = 1e-3,
     ) -> None:
         r"""q-Probability of Improvement.
 
         Args:
             model: A fitted model.
-            best_f: The best objective value observed so far (assumed noiseless). Can
-                be a `batch_shape`-shaped tensor, which in case of a batched model
-                specifies potentially different values for each element of the batch.
-            sampler: The sampler used to draw base samples. See `MCAcquisitionFunction`
-                more details.
+            best_f: The best objective value observed so far (assumed
+                noiseless). Can be a ``batch_shape``-shaped tensor, which in
+                case of a batched model specifies potentially different values
+                for each element of the batch.
+            sampler: The sampler used to draw base samples. See
+                ``MCAcquisitionFunction`` more details.
             objective: The MCAcquisitionObjective under which the samples are
-                evaluated. Defaults to `IdentityMCObjective()`.
-                NOTE: `ConstrainedMCObjective` for outcome constraints is deprecated in
-                favor of passing the `constraints` directly to this constructor.
+                evaluated. Defaults to ``IdentityMCObjective()``.
+                NOTE: ``ConstrainedMCObjective`` for outcome constraints is
+                deprecated in favor of passing the ``constraints`` directly to
+                this constructor.
             posterior_transform: A PosteriorTransform (optional).
-            X_pending:  A `m x d`-dim Tensor of `m` design points that have
+            X_pending:  A ``m x d``-dim Tensor of ``m`` design points that have
                 points that have been submitted for function evaluation
                 but have not yet been evaluated.  Concatenated into X upon
                 forward call.  Copied and set to have no gradient.
@@ -689,12 +728,13 @@ class qProbabilityOfImprovement(SampleReducingMCAcquisitionFunction):
                 of the step function. Smaller values yield more accurate
                 approximations of the function, but result in gradients
                 estimates with higher variance.
-            constraints: A list of constraint callables which map posterior samples to
-                a scalar. The associated constraint is considered satisfied if this
-                scalar is less than zero.
-            eta: Temperature parameter(s) governing the smoothness of the sigmoid
-                approximation to the constraint indicators. For more details, on this
-                parameter, see the docs of `compute_smoothed_feasibility_indicator`.
+            constraints: A list of constraint callables which map posterior
+                samples to a scalar. The associated constraint is considered
+                satisfied if this scalar is less than zero.
+            eta: Temperature parameter(s) governing the smoothness of the
+                sigmoid approximation to the constraint indicators. For more
+                details, on this parameter, see the docs of
+                ``compute_smoothed_feasibility_indicator``.
         """
         super().__init__(
             model=model,
@@ -705,18 +745,19 @@ class qProbabilityOfImprovement(SampleReducingMCAcquisitionFunction):
             constraints=constraints,
             eta=eta,
         )
-        best_f = torch.as_tensor(best_f, dtype=float).unsqueeze(-1)  # adding batch dim
+        best_f = torch.as_tensor(best_f).unsqueeze(-1)  # adding batch dim
         self.register_buffer("best_f", best_f)
-        self.register_buffer("tau", torch.as_tensor(tau, dtype=float))
+        self.register_buffer("tau", torch.as_tensor(tau))
 
     def _sample_forward(self, obj: Tensor) -> Tensor:
-        r"""Evaluate qProbabilityOfImprovement per sample on the candidate set `X`.
+        r"""Evaluate qProbabilityOfImprovement per sample on the candidate set ``X``.
 
         Args:
-            obj: A `sample_shape x batch_shape x q`-dim Tensor of MC objective values.
+            obj: A ``sample_shape x batch_shape x q``-dim Tensor of MC objective values.
 
         Returns:
-            A `sample_shape x batch_shape x q`-dim Tensor of improvement indicators.
+            A ``sample_shape x batch_shape x q``-dim Tensor of improvement
+                indicators.
         """
         improvement = obj - self.best_f.to(obj)
         return torch.sigmoid(improvement / self.tau)
@@ -727,18 +768,18 @@ class qSimpleRegret(SampleReducingMCAcquisitionFunction):
 
     Samples from the joint posterior over the q-batch and computes the simple regret.
 
-    `qSR(X) = E(max Y), Y ~ f(X), X = (x_1,...,x_q)`
+    ``qSR(X) = E(max Y), Y ~ f(X), X = (x_1,...,x_q)``
 
-    Constraints should be provided as a `ConstrainedMCObjective`.
-    Passing `constraints` as an argument is not supported. This is because
-    `SampleReducingMCAcquisitionFunction` computes the acquisition values on the sample
-    level and then weights the sample-level acquisition values by a soft feasibility
-    indicator. Hence, it expects non-log acquisition function values to be
-    non-negative. `qSimpleRegret` acquisition values can be negative, so we instead use
-    a `ConstrainedMCObjective` which applies constraints to the objectives (e.g. before
-    computing the acquisition function) and shifts negative objective values using
-    by an infeasible cost to ensure non-negativity (before applying constraints and
-    shifting them back).
+    Constraints should be provided as a ``ConstrainedMCObjective``.
+    Passing ``constraints`` as an argument is not supported. This is because
+    ``SampleReducingMCAcquisitionFunction`` computes the acquisition values on
+    the sample level and then weights the sample-level acquisition values by a
+    soft feasibility indicator. Hence, it expects non-log acquisition function
+    values to be non-negative. ``qSimpleRegret`` acquisition values can be
+    negative, so we instead use a ``ConstrainedMCObjective`` which applies
+    constraints to the objectives (e.g. before computing the acquisition
+    function) and shifts negative objective values using an infeasible cost to
+    ensure non-negativity (before applying constraints and shifting them back).
 
     Example:
         >>> model = SingleTaskGP(train_X, train_Y)
@@ -750,21 +791,21 @@ class qSimpleRegret(SampleReducingMCAcquisitionFunction):
     def __init__(
         self,
         model: Model,
-        sampler: Optional[MCSampler] = None,
-        objective: Optional[MCAcquisitionObjective] = None,
-        posterior_transform: Optional[PosteriorTransform] = None,
-        X_pending: Optional[Tensor] = None,
+        sampler: MCSampler | None = None,
+        objective: MCAcquisitionObjective | None = None,
+        posterior_transform: PosteriorTransform | None = None,
+        X_pending: Tensor | None = None,
     ) -> None:
         r"""q-Simple Regret.
 
         Args:
             model: A fitted model.
-            sampler: The sampler used to draw base samples. See `MCAcquisitionFunction`
-                more details.
+            sampler: The sampler used to draw base samples. See
+                ``MCAcquisitionFunction`` more details.
             objective: The MCAcquisitionObjective under which the samples are
-                evaluated. Defaults to `IdentityMCObjective()`.
+                evaluated. Defaults to ``IdentityMCObjective()``.
             posterior_transform: A PosteriorTransform (optional).
-            X_pending:  A `m x d`-dim Tensor of `m` design points that have
+            X_pending:  A ``m x d``-dim Tensor of ``m`` design points that have
                 points that have been submitted for function evaluation
                 but have not yet been evaluated.  Concatenated into X upon
                 forward call.  Copied and set to have no gradient.
@@ -778,13 +819,13 @@ class qSimpleRegret(SampleReducingMCAcquisitionFunction):
         )
 
     def _sample_forward(self, obj: Tensor) -> Tensor:
-        r"""Evaluate qSimpleRegret per sample on the candidate set `X`.
+        r"""Evaluate qSimpleRegret per sample on the candidate set ``X``.
 
         Args:
-            obj: A `sample_shape x batch_shape x q`-dim Tensor of MC objective values.
+            obj: A ``sample_shape x batch_shape x q``-dim Tensor of MC objective values.
 
         Returns:
-            A `sample_shape x batch_shape x q`-dim Tensor of simple regret values.
+            A ``sample_shape x batch_shape x q``-dim Tensor of simple regret values.
         """
         return obj
 
@@ -795,19 +836,19 @@ class qUpperConfidenceBound(SampleReducingMCAcquisitionFunction):
     Uses a reparameterization to extend UCB to qUCB for q > 1 (See Appendix A
     of [Wilson2017reparam].)
 
-    `qUCB = E(max(mu + |Y_tilde - mu|))`, where `Y_tilde ~ N(mu, beta pi/2 Sigma)`
-    and `f(X)` has distribution `N(mu, Sigma)`.
+    ``qUCB = E(max(mu + |Y_tilde - mu|))``, where ``Y_tilde ~ N(mu, beta pi/2 Sigma)``
+    and ``f(X)`` has distribution ``N(mu, Sigma)``.
 
-    Constraints should be provided as a `ConstrainedMCObjective`.
-    Passing `constraints` as an argument is not supported. This is because
-    `SampleReducingMCAcquisitionFunction` computes the acquisition values on the sample
-    level and then weights the sample-level acquisition values by a soft feasibility
-    indicator. Hence, it expects non-log acquisition function values to be
-    non-negative. `qSimpleRegret` acquisition values can be negative, so we instead use
-    a `ConstrainedMCObjective` which applies constraints to the objectives (e.g. before
-    computing the acquisition function) and shifts negative objective values using
-    by an infeasible cost to ensure non-negativity (before applying constraints and
-    shifting them back).
+    Constraints should be provided as a ``ConstrainedMCObjective``.
+    Passing ``constraints`` as an argument is not supported. This is because
+    ``SampleReducingMCAcquisitionFunction`` computes the acquisition values on
+    the sample level and then weights the sample-level acquisition values by a
+    soft feasibility indicator. Hence, it expects non-log acquisition function
+    values to be non-negative. ``qUpperConfidenceBound`` acquisition values can
+    be negative, so we instead use a ``ConstrainedMCObjective`` which applies
+    constraints to the objectives (e.g. before computing the acquisition
+    function) and shifts negative objective values using an infeasible cost to
+    ensure non-negativity (before applying constraints and shifting them back).
 
     Example:
         >>> model = SingleTaskGP(train_X, train_Y)
@@ -820,25 +861,25 @@ class qUpperConfidenceBound(SampleReducingMCAcquisitionFunction):
         self,
         model: Model,
         beta: float,
-        sampler: Optional[MCSampler] = None,
-        objective: Optional[MCAcquisitionObjective] = None,
-        posterior_transform: Optional[PosteriorTransform] = None,
-        X_pending: Optional[Tensor] = None,
+        sampler: MCSampler | None = None,
+        objective: MCAcquisitionObjective | None = None,
+        posterior_transform: PosteriorTransform | None = None,
+        X_pending: Tensor | None = None,
     ) -> None:
         r"""q-Upper Confidence Bound.
 
         Args:
             model: A fitted model.
             beta: Controls tradeoff between mean and standard deviation in UCB.
-            sampler: The sampler used to draw base samples. See `MCAcquisitionFunction`
-                more details.
+            sampler: The sampler used to draw base samples. See
+                ``MCAcquisitionFunction`` more details.
             objective: The MCAcquisitionObjective under which the samples are
-                evaluated. Defaults to `IdentityMCObjective()`.
+                evaluated. Defaults to ``IdentityMCObjective()``.
             posterior_transform: A PosteriorTransform (optional).
-            X_pending: A `batch_shape x m x d`-dim Tensor of `m` design points that have
-                points that have been submitted for function evaluation but have not yet
-                been evaluated. Concatenated into X upon forward call. Copied and set to
-                have no gradient.
+            X_pending: A ``batch_shape x m x d``-dim Tensor of ``m`` design
+                points that have points that have been submitted for function
+                evaluation but have not yet been evaluated. Concatenated into X
+                upon forward call. Copied and set to have no gradient.
         """
         super().__init__(
             model=model,
@@ -847,16 +888,102 @@ class qUpperConfidenceBound(SampleReducingMCAcquisitionFunction):
             posterior_transform=posterior_transform,
             X_pending=X_pending,
         )
-        self.beta_prime = math.sqrt(beta * math.pi / 2)
+        self.beta_prime = self._get_beta_prime(beta=beta)
+
+    def _get_beta_prime(self, beta: float) -> float:
+        return math.sqrt(beta * math.pi / 2)
 
     def _sample_forward(self, obj: Tensor) -> Tensor:
-        r"""Evaluate qUpperConfidenceBound per sample on the candidate set `X`.
+        r"""Evaluate qUpperConfidenceBound per sample on the candidate set ``X``.
 
         Args:
-            obj: A `sample_shape x batch_shape x q`-dim Tensor of MC objective values.
+            obj: A ``sample_shape x batch_shape x q``-dim Tensor of MC objective values.
 
         Returns:
-            A `sample_shape x batch_shape x q`-dim Tensor of acquisition values.
+            A ``sample_shape x batch_shape x q``-dim Tensor of acquisition values.
         """
         mean = obj.mean(dim=0)
         return mean + self.beta_prime * (obj - mean).abs()
+
+
+class qLowerConfidenceBound(qUpperConfidenceBound):
+    r"""MC-based batched lower confidence bound.
+
+    This acquisition function is useful for confident/risk-averse decision making.
+    This acquisition function is intended to be maximized as with qUpperConfidenceBound,
+    but the qLowerConfidenceBound will be pessimistic in the face of uncertainty and
+    lead to conservative candidates.
+    """
+
+    def _get_beta_prime(self, beta: float) -> float:
+        """Multiply beta prime by -1 to get the lower confidence bound."""
+        return -super()._get_beta_prime(beta=beta)
+
+
+class qPosteriorStandardDeviation(SampleReducingMCAcquisitionFunction):
+    r"""MC-based batch Posterior Standard Deviation.
+
+    An acquisition function for pure exploration.
+
+    Example:
+        >>> model = SingleTaskGP(train_X, train_Y)
+        >>> sampler = SobolQMCNormalSampler(1024)
+        >>> qPSTD = qPosteriorStandardDeviation(model, sampler)
+        >>> std = qPSTD(test_X)
+    """
+
+    def __init__(
+        self,
+        model: Model,
+        sampler: MCSampler | None = None,
+        objective: MCAcquisitionObjective | None = None,
+        posterior_transform: PosteriorTransform | None = None,
+        X_pending: Tensor | None = None,
+        constraints: list[Callable[[Tensor], Tensor]] | None = None,
+        eta: Tensor | float = 1e-3,
+    ) -> None:
+        r"""q-Posterior Standard Deviation.
+
+        Args:
+            model: A fitted model.
+            sampler: The sampler used to draw base samples. See
+                ``MCAcquisitionFunction`` more details.
+            objective: The MCAcquisitionObjective under which the samples are
+                evaluated. Defaults to ``IdentityMCObjective()``.
+            posterior_transform: A PosteriorTransform (optional).
+            X_pending: A ``batch_shape x m x d``-dim Tensor of ``m`` design
+                points that have points that have been submitted for function
+                evaluation but have not yet been evaluated. Concatenated into X
+                upon forward call. Copied and set to have no gradient.
+            constraints: A list of constraint callables which map a Tensor of
+                posterior samples of dimension ``sample_shape x batch-shape x q
+                x m``-dim to a ``sample_shape x batch-shape x q``-dim Tensor.
+                The associated constraints are considered satisfied if the output
+                is less than zero.
+            eta: Temperature parameter(s) governing the smoothness of the
+                sigmoid approximation to the constraint indicators. For more
+                details, on this parameter, see the docs of
+                ``compute_smoothed_feasibility_indicator``.
+        """
+        super().__init__(
+            model=model,
+            sampler=sampler,
+            objective=objective,
+            posterior_transform=posterior_transform,
+            X_pending=X_pending,
+            constraints=constraints,
+            eta=eta,
+        )
+        self._scale = math.sqrt(math.pi / 2)
+
+    def _sample_forward(self, obj: Tensor) -> Tensor:
+        r"""Evaluate qPosteriorStandardDeviation per sample on the candidate set ``X``.
+
+        Args:
+            obj: A ``sample_shape x batch_shape x q``-dim Tensor of MC objective values.
+
+        Returns:
+            A ``sample_shape x batch_shape x q``-dim Tensor of acquisition values.
+        """
+        mean = obj.mean(dim=0)
+        return (obj - mean).abs() * self._scale

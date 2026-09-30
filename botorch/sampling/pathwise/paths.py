@@ -6,19 +6,9 @@
 
 from __future__ import annotations
 
-from abc import ABC
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    Iterable,
-    Iterator,
-    List,
-    Mapping,
-    Optional,
-    Tuple,
-    Union,
-)
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from typing import Any
 
 from botorch.exceptions.errors import UnsupportedError
 from botorch.sampling.pathwise.features import FeatureMap
@@ -34,16 +24,26 @@ from torch.nn import Module, ModuleDict, ModuleList, Parameter
 class SamplePath(ABC, TransformedModuleMixin, Module):
     r"""Abstract base class for Botorch sample paths."""
 
+    @abstractmethod
+    def set_ensemble_as_batch(self, ensemble_as_batch: bool) -> None:
+        """Sets whether the ensemble dimension is considered as a batch dimension.
+
+        Args:
+            ensemble_as_batch: Whether the ensemble dimension is considered as a batch
+                dimension or not.
+        """
+        pass  # pragma: no cover
+
 
 class PathDict(SamplePath):
     r"""A dictionary of SamplePaths."""
 
     def __init__(
         self,
-        paths: Optional[Mapping[str, SamplePath]] = None,
-        join: Optional[Callable[[List[Tensor]], Tensor]] = None,
-        input_transform: Optional[TInputTransform] = None,
-        output_transform: Optional[TOutputTransform] = None,
+        paths: Mapping[str, SamplePath] | None = None,
+        join: Callable[[list[Tensor]], Tensor] | None = None,
+        input_transform: TInputTransform | None = None,
+        output_transform: TOutputTransform | None = None,
     ) -> None:
         r"""Initializes a PathDict instance.
 
@@ -66,11 +66,11 @@ class PathDict(SamplePath):
             else ModuleDict({} if paths is None else paths)
         )
 
-    def forward(self, x: Tensor, **kwargs: Any) -> Union[Tensor, Dict[str, Tensor]]:
+    def forward(self, x: Tensor, **kwargs: Any) -> Tensor | dict[str, Tensor]:
         out = [path(x, **kwargs) for path in self.paths.values()]
         return dict(zip(self.paths, out)) if self.join is None else self.join(out)
 
-    def items(self) -> Iterable[Tuple[str, SamplePath]]:
+    def items(self) -> Iterable[tuple[str, SamplePath]]:
         return self.paths.items()
 
     def keys(self) -> Iterable[str]:
@@ -94,16 +94,26 @@ class PathDict(SamplePath):
     def __setitem__(self, key: str, val: SamplePath) -> None:
         self.paths[key] = val
 
+    def set_ensemble_as_batch(self, ensemble_as_batch: bool) -> None:
+        """Sets whether the ensemble dimension is considered as a batch dimension.
+
+        Args:
+            ensemble_as_batch: Whether the ensemble dimension is considered as a batch
+                dimension or not.
+        """
+        for path in self.paths.values():
+            path.set_ensemble_as_batch(ensemble_as_batch)
+
 
 class PathList(SamplePath):
     r"""A list of SamplePaths."""
 
     def __init__(
         self,
-        paths: Optional[Iterable[SamplePath]] = None,
-        join: Optional[Callable[[List[Tensor]], Tensor]] = None,
-        input_transform: Optional[TInputTransform] = None,
-        output_transform: Optional[TOutputTransform] = None,
+        paths: Iterable[SamplePath] | None = None,
+        join: Callable[[list[Tensor]], Tensor] | None = None,
+        input_transform: TInputTransform | None = None,
+        output_transform: TOutputTransform | None = None,
     ) -> None:
         r"""Initializes a PathList instance.
 
@@ -127,7 +137,7 @@ class PathList(SamplePath):
             else ModuleList({} if paths is None else paths)
         )
 
-    def forward(self, x: Tensor, **kwargs: Any) -> Union[Tensor, List[Tensor]]:
+    def forward(self, x: Tensor, **kwargs: Any) -> Tensor | list[Tensor]:
         out = [path(x, **kwargs) for path in self.paths]
         return out if self.join is None else self.join(out)
 
@@ -146,6 +156,16 @@ class PathList(SamplePath):
     def __setitem__(self, key: int, val: SamplePath) -> None:
         self.paths[key] = val
 
+    def set_ensemble_as_batch(self, ensemble_as_batch: bool) -> None:
+        """Sets whether the ensemble dimension is considered as a batch dimension.
+
+        Args:
+            ensemble_as_batch: Whether the ensemble dimension is considered as a batch
+                dimension or not.
+        """
+        for path in self.paths:
+            path.set_ensemble_as_batch(ensemble_as_batch)
+
 
 class GeneralizedLinearPath(SamplePath):
     r"""A sample path in the form of a generalized linear model."""
@@ -153,10 +173,12 @@ class GeneralizedLinearPath(SamplePath):
     def __init__(
         self,
         feature_map: FeatureMap,
-        weight: Union[Parameter, Tensor],
-        bias_module: Optional[Module] = None,
-        input_transform: Optional[TInputTransform] = None,
-        output_transform: Optional[TOutputTransform] = None,
+        weight: Parameter | Tensor,
+        bias_module: Module | None = None,
+        input_transform: TInputTransform | None = None,
+        output_transform: TOutputTransform | None = None,
+        is_ensemble: bool = False,
+        ensemble_as_batch: bool = False,
     ):
         r"""Initializes a GeneralizedLinearPath instance.
 
@@ -167,10 +189,17 @@ class GeneralizedLinearPath(SamplePath):
 
         Args:
             feature_map: A map used to featurize the module's inputs.
-            weight: A tensor of weights used to combine input features.
+            weight: A tensor of weights used to combine input features. When
+                generated with ``draw_kernel_feature_paths``, ``weight`` is a Tensor
+                with the shape ``sample_shape x batch_shape x num_outputs``.
             bias_module: An optional module used to define additive offsets.
             input_transform: An optional input transform for the module.
             output_transform: An optional output transform for the module.
+            is_ensemble: Whether the associated model is an ensemble model or not.
+            ensemble_as_batch: Whether the ensemble dimension is added as a batch
+                dimension or not. If ``True``, the ensemble dimension is treated as a
+                batch dimension, which allows for the joint optimization of all members
+                of the ensemble.
         """
         super().__init__()
         self.feature_map = feature_map
@@ -180,8 +209,38 @@ class GeneralizedLinearPath(SamplePath):
         self.bias_module = bias_module
         self.input_transform = input_transform
         self.output_transform = output_transform
+        self.is_ensemble = is_ensemble
+        self.ensemble_as_batch = ensemble_as_batch
 
     def forward(self, x: Tensor, **kwargs) -> Tensor:
+        """Evaluates the path.
+
+        Args:
+            x: The input tensor of shape ``batch_shape x [num_ensemble x] q x d``,
+                where ``num_ensemble`` is the number of ensemble members and is
+                required to *only* be included if ``is_ensemble=True`` and
+                ``ensemble_as_batch=True``.
+            kwargs: Additional keyword arguments passed to the feature map.
+
+        Returns:
+            A tensor of shape ``batch_shape x [num_ensemble x] q x m``, where
+                ``m`` is the number of outputs, where ``num_ensemble`` is only
+                included if ``is_ensemble`` is ``True``, and regardless of whether
+                ``ensemble_as_batch`` is ``True`` or not.
+        """
+        if self.is_ensemble and not self.ensemble_as_batch:
+            # assuming that the ensembling dimension is added after (n, d), but
+            # before the other batch dimensions, starting from the left.
+            x = x.unsqueeze(-3)
         feat = self.feature_map(x, **kwargs)
         out = (feat @ self.weight.unsqueeze(-1)).squeeze(-1)
         return out if self.bias_module is None else out + self.bias_module(x)
+
+    def set_ensemble_as_batch(self, ensemble_as_batch: bool) -> None:
+        """Sets whether the ensemble dimension is considered as a batch dimension.
+
+        Args:
+            ensemble_as_batch: Whether the ensemble dimension is considered as a batch
+                dimension or not.
+        """
+        self.ensemble_as_batch = ensemble_as_batch

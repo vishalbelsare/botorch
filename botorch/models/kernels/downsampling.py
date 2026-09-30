@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 from gpytorch.constraints import Interval, Positive
 from gpytorch.kernels import Kernel
@@ -19,31 +17,31 @@ class DownsamplingKernel(Kernel):
     r"""GPyTorch Downsampling Kernel.
 
     Computes a covariance matrix based on the down sampling kernel between
-    inputs `x_1` and `x_2` (we expect `d = 1`):
+    inputs ``x_1`` and ``x_2`` (we expect ``d = 1``):
 
         K(\mathbf{x_1}, \mathbf{x_2}) = c + (1 - x_1)^(1 + delta) *
             (1 - x_2)^(1 + delta).
 
-    where `c` is an offset parameter, and `delta` is a power parameter.
+    where ``c`` is an offset parameter, and ``delta`` is a power parameter.
     """
 
     def __init__(
         self,
-        power_prior: Optional[Prior] = None,
-        offset_prior: Optional[Prior] = None,
-        power_constraint: Optional[Interval] = None,
-        offset_constraint: Optional[Interval] = None,
+        power_prior: Prior | None = None,
+        offset_prior: Prior | None = None,
+        power_constraint: Interval | None = None,
+        offset_constraint: Interval | None = None,
         **kwargs,
     ):
         r"""
         Args:
             power_constraint: Constraint to place on power parameter. Default is
-                `Positive`.
+                ``Positive``.
             power_prior: Prior over the power parameter.
             offset_constraint: Constraint to place on offset parameter. Default is
-                `Positive`.
-            active_dims: List of data dimensions to operate on. `len(active_dims)`
-                should equal `num_dimensions`.
+                ``Positive``.
+            active_dims: List of data dimensions to operate on. ``len(active_dims)``
+                should equal ``num_dimensions``.
         """
         super().__init__(**kwargs)
 
@@ -110,8 +108,8 @@ class DownsamplingKernel(Kernel):
         self,
         x1: Tensor,
         x2: Tensor,
-        diag: Optional[bool] = False,
-        last_dim_is_batch: Optional[bool] = False,
+        diag: bool | None = False,
+        last_dim_is_batch: bool | None = False,
         **params,
     ) -> Tensor:
         offset = self.offset

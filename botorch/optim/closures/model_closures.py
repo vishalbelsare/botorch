@@ -8,12 +8,12 @@ r"""Utilities for building model-based closures."""
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
+from functools import partial
 from itertools import chain, repeat
-from types import NoneType
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from typing import Any
 
 from botorch.optim.closures.core import ForwardBackwardClosure
-from botorch.utils.dispatcher import Dispatcher, type_bypassing_encoder
 from gpytorch.mlls import (
     ExactMarginalLogLikelihood,
     MarginalLogLikelihood,
@@ -22,115 +22,73 @@ from gpytorch.mlls import (
 from torch import Tensor
 from torch.utils.data import DataLoader
 
-GetLossClosure = Dispatcher("get_loss_closure", encoder=type_bypassing_encoder)
-GetLossClosureWithGrads = Dispatcher(
-    "get_loss_closure_with_grads", encoder=type_bypassing_encoder
-)
-
 
 def get_loss_closure(
     mll: MarginalLogLikelihood,
-    data_loader: Optional[DataLoader] = None,
-    **kwargs: Any,
+    data_loader: DataLoader | None = None,
 ) -> Callable[[], Tensor]:
-    r"""Public API for GetLossClosure dispatcher.
+    r"""Factory function for creating loss closures from MarginalLogLikelihoods.
 
-    This method, and the dispatcher that powers it, acts as a clearing house
-    for factory functions that define how `mll` is evaluated.
+    This method acts as a clearing house for factory functions that define how
+    ``mll`` is evaluated.
 
-    Users may specify custom evaluation routines by registering a factory function
-    with GetLossClosure. These factories should be registered using the type signature
-
-        `Type[MarginalLogLikeLihood], Type[Likelihood], Type[Model], Type[DataLoader]`.
-
-    The final argument, Type[DataLoader], is optional. Evaluation routines that obtain
-    training data from, e.g., `mll.model` should register this argument as `type(None)`.
+    Users may specify custom evaluation routines by passing an ``mll`` or an
+    ``mll.model`` with a method ``compute_custom_loss``.
 
     Args:
         mll: A MarginalLogLikelihood instance whose negative defines the loss.
         data_loader: An optional DataLoader instance for cases where training
-            data is passed in rather than obtained from `mll.model`.
+            data is passed in rather than obtained from ``mll.model``.
 
     Returns:
         A closure that takes zero positional arguments and returns the negated
-        value of `mll`.
+        value of ``mll``.
     """
-    return GetLossClosure(
-        mll, type(mll.likelihood), type(mll.model), data_loader, **kwargs
-    )
+    if hasattr(mll, "compute_custom_loss"):
+        return mll.compute_custom_loss
+    if hasattr(mll.model, "compute_custom_loss"):
+        return partial(mll.model.compute_custom_loss, mll=mll)
+
+    if data_loader is not None:
+        return _get_loss_closure_fallback_external(mll=mll, data_loader=data_loader)
+
+    if isinstance(mll, ExactMarginalLogLikelihood):
+        return _get_loss_closure_exact_internal(mll=mll)
+
+    if isinstance(mll, SumMarginalLogLikelihood):
+        return _get_loss_closure_sum_internal(mll=mll)
+
+    return _get_loss_closure_fallback_internal(mll=mll)
 
 
 def get_loss_closure_with_grads(
     mll: MarginalLogLikelihood,
-    parameters: Dict[str, Tensor],
-    data_loader: Optional[DataLoader] = None,
-    backward: Callable[[Tensor], None] = Tensor.backward,
-    reducer: Optional[Callable[[Tensor], Tensor]] = Tensor.sum,
-    context_manager: Optional[Callable] = None,
-    **kwargs: Any,
-) -> Callable[[], Tuple[Tensor, Tuple[Tensor, ...]]]:
-    r"""Public API for GetLossClosureWithGrads dispatcher.
+    parameters: dict[str, Tensor],
+    data_loader: DataLoader | None = None,
+) -> ForwardBackwardClosure:
+    """
+    Add a backward pass to a loss closure obtained by calling
+    ``get_loss_closure``, wrapping it in a ``ForwardBackwardClosure``.
 
-    In most cases, this method simply adds a backward pass to a loss closure obtained by
-    calling `get_loss_closure`. For further details, see `get_loss_closure`.
+    For further details, see ``get_loss_closure``.
 
     Args:
         mll: A MarginalLogLikelihood instance whose negative defines the loss.
-        parameters: A dictionary of tensors whose `grad` fields are to be returned.
-        reducer: Optional callable used to reduce the output of the forward pass.
+        parameters: A dictionary of tensors whose ``grad`` fields are to be returned.
         data_loader: An optional DataLoader instance for cases where training
-            data is passed in rather than obtained from `mll.model`.
-        context_manager: An optional ContextManager used to wrap each forward-backward
-            pass. Defaults to a `zero_grad_ctx` that zeroes the gradients of
-            `parameters` upon entry. None may be passed as an alias for `nullcontext`.
+            data is passed in rather than obtained from ``mll.model``.
 
     Returns:
         A closure that takes zero positional arguments and returns the reduced and
-        negated value of `mll` along with the gradients of `parameters`.
+        negated value of ``mll`` along with the gradients of ``parameters``.
     """
-    return GetLossClosureWithGrads(
-        mll,
-        type(mll.likelihood),
-        type(mll.model),
-        data_loader,
-        parameters=parameters,
-        reducer=reducer,
-        backward=backward,
-        context_manager=context_manager,
-        **kwargs,
-    )
+    loss_closure = get_loss_closure(mll=mll, data_loader=data_loader)
+    return ForwardBackwardClosure(forward=loss_closure, parameters=parameters)
 
 
-@GetLossClosureWithGrads.register(object, object, object, object)
-def _get_loss_closure_with_grads_fallback(
-    mll: MarginalLogLikelihood,
-    _likelihood_type: object,
-    _model_type: object,
-    data_loader: Optional[DataLoader],
-    parameters: Dict[str, Tensor],
-    reducer: Callable[[Tensor], Tensor] = Tensor.sum,
-    backward: Callable[[Tensor], None] = Tensor.backward,
-    context_manager: Callable = None,  # pyre-ignore [9]
-    **kwargs: Any,
-) -> ForwardBackwardClosure:
-    r"""Wraps a `loss_closure` with a ForwardBackwardClosure."""
-    loss_closure = get_loss_closure(mll, data_loader=data_loader, **kwargs)
-    return ForwardBackwardClosure(
-        forward=loss_closure,
-        backward=backward,
-        parameters=parameters,
-        reducer=reducer,
-        context_manager=context_manager,
-    )
-
-
-@GetLossClosure.register(MarginalLogLikelihood, object, object, DataLoader)
 def _get_loss_closure_fallback_external(
     mll: MarginalLogLikelihood,
-    _likelihood_type: object,
-    _model_type: object,
     data_loader: DataLoader,
-    **ignore: Any,
 ) -> Callable[[], Tensor]:
     r"""Fallback loss closure with externally provided data."""
     batch_generator = chain.from_iterable(iter(data_loader) for _ in repeat(None))
@@ -151,9 +109,8 @@ def _get_loss_closure_fallback_external(
     return closure
 
 
-@GetLossClosure.register(MarginalLogLikelihood, object, object, NoneType)
 def _get_loss_closure_fallback_internal(
-    mll: MarginalLogLikelihood, _: object, __: object, ___: None, **ignore: Any
+    mll: MarginalLogLikelihood,
 ) -> Callable[[], Tensor]:
     r"""Fallback loss closure with internally managed data."""
 
@@ -165,34 +122,48 @@ def _get_loss_closure_fallback_internal(
     return closure
 
 
-@GetLossClosure.register(ExactMarginalLogLikelihood, object, object, NoneType)
 def _get_loss_closure_exact_internal(
-    mll: ExactMarginalLogLikelihood, _: object, __: object, ___: None, **ignore: Any
+    mll: ExactMarginalLogLikelihood,
 ) -> Callable[[], Tensor]:
     r"""ExactMarginalLogLikelihood loss closure with internally managed data."""
 
     def closure(**kwargs: Any) -> Tensor:
-        model_output = mll.model(*mll.model.train_inputs)
+        model = mll.model
+        # The inputs will get transformed in forward here.
+        model_output = model(*model.train_inputs)
         log_likelihood = mll(
-            model_output, mll.model.train_targets, *mll.model.train_inputs, **kwargs
+            model_output,
+            model.train_targets,
+            # During model training, the model inputs get transformed in the forward
+            # pass. The train_inputs property is not transformed yet, so we need to
+            # transform it before passing it to the likelihood for consistency.
+            *(model.transform_inputs(X=t_in) for t_in in model.train_inputs),
+            **kwargs,
         )
         return -log_likelihood
 
     return closure
 
 
-@GetLossClosure.register(SumMarginalLogLikelihood, object, object, NoneType)
 def _get_loss_closure_sum_internal(
-    mll: SumMarginalLogLikelihood, _: object, __: object, ___: None, **ignore: Any
+    mll: SumMarginalLogLikelihood,
 ) -> Callable[[], Tensor]:
     r"""SumMarginalLogLikelihood loss closure with internally managed data."""
 
     def closure(**kwargs: Any) -> Tensor:
-        model_output = mll.model(*mll.model.train_inputs)
+        model = mll.model
+        # The inputs will get transformed in forward here.
+        model_output = model(*model.train_inputs)
         log_likelihood = mll(
             model_output,
-            mll.model.train_targets,
-            *map(list, mll.model.train_inputs),
+            model.train_targets,
+            # During model training, the model inputs get transformed in the forward
+            # pass. The train_inputs property is not transformed yet, so we need to
+            # transform it before passing it to the likelihood for consistency.
+            *(
+                (model.transform_inputs(X=t_in) for t_in in sub_t_in)
+                for sub_t_in in model.train_inputs
+            ),
             **kwargs,
         )
         return -log_likelihood

@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 r"""
-Sampler to be used with `EnsemblePosteriors` to enable
+Sampler to be used with ``EnsemblePosteriors`` to enable
 deterministic optimization of acquisition functions with ensemble models.
 """
 
@@ -15,10 +15,11 @@ import torch
 from botorch.posteriors.ensemble import EnsemblePosterior
 from botorch.sampling.base import MCSampler
 from torch import Tensor
+from torch.distributions.multinomial import Multinomial
 
 
 class IndexSampler(MCSampler):
-    r"""A sampler that calls `posterior.rsample_from_base_samples` to
+    r"""A sampler that calls ``posterior.rsample_from_base_samples`` to
     generate the samples via index base samples."""
 
     def forward(self, posterior: EnsemblePosterior) -> Tensor:
@@ -44,14 +45,19 @@ class IndexSampler(MCSampler):
             posterior: The ensemble posterior to construct the base samples
                 for.
         """
-        if self.base_samples is None or self.base_samples.shape != self.sample_shape:
+        if (
+            self.base_samples is None
+            or self.base_samples.shape != self.sample_shape + posterior.batch_shape
+        ):
             with torch.random.fork_rng():
                 torch.manual_seed(self.seed)
-                base_samples = torch.multinomial(
-                    posterior.weights,
-                    num_samples=self.sample_shape.numel(),
-                    replacement=True,
-                ).reshape(self.sample_shape)
+                base_samples = (
+                    Multinomial(
+                        probs=posterior.mixture_weights,
+                    )
+                    .sample(sample_shape=self.sample_shape)
+                    .argmax(dim=-1)
+                )
             self.register_buffer("base_samples", base_samples)
         if self.base_samples.device != posterior.device:
             self.to(device=posterior.device)  # pragma: nocover
@@ -60,5 +66,5 @@ class IndexSampler(MCSampler):
         self, posterior: EnsemblePosterior, base_sampler: IndexSampler
     ) -> None:
         r"""Null operation just needed for compatibility with
-        `CachedCholeskyAcquisitionFunction`."""
+        ``CachedCholeskyAcquisitionFunction``."""
         pass

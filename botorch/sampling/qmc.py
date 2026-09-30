@@ -17,7 +17,6 @@ References:
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 import torch
 from torch import Tensor
@@ -25,11 +24,11 @@ from torch.quasirandom import SobolEngine
 
 
 class NormalQMCEngine:
-    r"""Engine for qMC sampling from a Multivariate Normal `N(0, I_d)`.
+    r"""Engine for qMC sampling from a Multivariate Normal ``N(0, I_d)``.
 
     By default, this implementation uses Box-Muller transformed Sobol samples
     following pg. 123 in [Pages2018numprob]_. To use the inverse transform
-    instead, set `inv_transform=True`.
+    instead, set ``inv_transform=True``.
 
     Example:
         >>> engine = NormalQMCEngine(3)
@@ -37,9 +36,9 @@ class NormalQMCEngine:
     """
 
     def __init__(
-        self, d: int, seed: Optional[int] = None, inv_transform: bool = False
+        self, d: int, seed: int | None = None, inv_transform: bool = False
     ) -> None:
-        r"""Engine for drawing qMC samples from a multivariate normal `N(0, I_d)`.
+        r"""Engine for drawing qMC samples from a multivariate normal ``N(0, I_d)``.
 
         Args:
             d: The dimension of the samples.
@@ -60,26 +59,26 @@ class NormalQMCEngine:
     def draw(
         self,
         n: int = 1,
-        out: Optional[Tensor] = None,
-        dtype: Optional[torch.dtype] = None,
-    ) -> Optional[Tensor]:
-        r"""Draw `n` qMC samples from the standard Normal.
+        out: Tensor | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> Tensor | None:
+        r"""Draw ``n`` qMC samples from the standard Normal.
 
         Args:
             n: The number of samples to draw. As a best practice, use powers of 2.
             out: An option output tensor. If provided, draws are put into this
                 tensor, and the function returns None.
-            dtype: The desired torch data type (ignored if `out` is provided).
-                If None, uses `torch.get_default_dtype()`.
+            dtype: The desired torch data type (ignored if ``out`` is provided).
+                If None, uses ``torch.get_default_dtype()``.
 
         Returns:
-            A `n x d` tensor of samples if `out=None` and `None` otherwise.
+            A ``n x d`` tensor of samples if ``out=None`` and ``None`` otherwise.
         """
         dtype = torch.get_default_dtype() if dtype is None else dtype
         # get base samples
         samples = self._sobol_engine.draw(n, dtype=dtype)
         if self._inv_transform:
-            # apply inverse transform (values to close to 0/1 result in inf values)
+            # apply inverse transform (values too close to 0/1 result in inf values)
             v = 0.5 + (1 - torch.finfo(samples.dtype).eps) * (samples - 0.5)
             samples_tf = torch.erfinv(2 * v - 1) * math.sqrt(2)
         else:
@@ -99,11 +98,11 @@ class NormalQMCEngine:
 
 
 class MultivariateNormalQMCEngine:
-    r"""Engine for qMC sampling from a multivariate Normal `N(\mu, \Sigma)`.
+    r"""Engine for qMC sampling from a multivariate Normal ``N(\mu, \Sigma)``.
 
     By default, this implementation uses Box-Muller transformed Sobol samples
     following pg. 123 in [Pages2018numprob]_. To use the inverse transform
-    instead, set `inv_transform=True`.
+    instead, set ``inv_transform=True``.
 
     Example:
         >>> mean = torch.tensor([1.0, 2.0])
@@ -116,10 +115,10 @@ class MultivariateNormalQMCEngine:
         self,
         mean: Tensor,
         cov: Tensor,
-        seed: Optional[int] = None,
+        seed: int | None = None,
         inv_transform: bool = False,
     ) -> None:
-        r"""Engine for qMC sampling from a multivariate Normal `N(\mu, \Sigma)`.
+        r"""Engine for qMC sampling from a multivariate Normal ``N(\mu, \Sigma)``.
 
         Args:
             mean: The mean vector.
@@ -147,11 +146,13 @@ class MultivariateNormalQMCEngine:
             tol = 1e-8 if eigval.dtype == torch.double else 1e-6
             if torch.any(eigval < -tol):
                 raise ValueError("Covariance matrix not PSD.")
-            eigval_root = eigval.clamp_min(0.0).sqrt()
+            eigval_root = torch.where(
+                eigval > tol, eigval, torch.zeros_like(eigval)
+            ).sqrt()
             self._corr_matrix = (eigvec * eigval_root).transpose(-1, -2)
 
-    def draw(self, n: int = 1, out: Optional[Tensor] = None) -> Optional[Tensor]:
-        r"""Draw `n` qMC samples from the multivariate Normal.
+    def draw(self, n: int = 1, out: Tensor | None = None) -> Tensor | None:
+        r"""Draw ``n`` qMC samples from the multivariate Normal.
 
         Args:
             n: The number of samples to draw. As a best practice, use powers of 2.
@@ -159,7 +160,7 @@ class MultivariateNormalQMCEngine:
                 tensor, and the function returns None.
 
         Returns:
-            A `n x d` tensor of samples if `out=None` and `None` otherwise.
+            A ``n x d`` tensor of samples if ``out=None`` and ``None`` otherwise.
         """
         dtype = out.dtype if out is not None else self._mean.dtype
         device = out.device if out is not None else self._mean.device

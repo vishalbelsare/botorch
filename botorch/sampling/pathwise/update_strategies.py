@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import NoneType
-
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 import torch
 from botorch.models.approximate_gp import ApproximateGPyTorchModel
@@ -22,6 +22,7 @@ from botorch.sampling.pathwise.utils import (
     TInputTransform,
 )
 from botorch.utils.dispatcher import Dispatcher
+from botorch.utils.transforms import is_ensemble
 from botorch.utils.types import DEFAULT
 from gpytorch.kernels.kernel import Kernel
 from gpytorch.likelihoods import _GaussianLikelihoodBase, Likelihood
@@ -41,7 +42,7 @@ GaussianUpdate = Dispatcher("gaussian_update")
 def gaussian_update(
     model: GP,
     sample_values: Tensor,
-    likelihood: Optional[Likelihood] = DEFAULT,
+    likelihood: Likelihood | None = DEFAULT,
     **kwargs: Any,
 ) -> GeneralizedLinearPath:
     r"""Computes a Gaussian pathwise update in exact arithmetic:
@@ -53,15 +54,15 @@ def gaussian_update(
                                                 V
                                     "Gaussian pathwise update"
 
-    where `=` denotes equality in distribution, :math:`f \sim GP(0, k)`,
-    :math:`y \sim N(f(X), \Sigma)`, and :math:`\epsilon \sim N(0, \Sigma)`.
+    where ``=`` denotes equality in distribution, :math:``f \sim GP(0, k)``,
+    :math:``y \sim N(f(X), \Sigma)``, and :math:``\epsilon \sim N(0, \Sigma)``.
     For more information, see [wilson2020sampling]_ and [wilson2021pathwise]_.
 
     Args:
         model: A Gaussian process prior together with a likelihood.
-        sample_values: Assumed values for :math:`f(X)`.
+        sample_values: Assumed values for :math:``f(X)``.
         likelihood: An optional likelihood used to help define the desired
-            update. Defaults to `model.likelihood` if it exists else None.
+            update. Defaults to ``model.likelihood`` if it exists else None.
     """
     if likelihood is DEFAULT:
         likelihood = getattr(model, "likelihood", None)
@@ -74,11 +75,12 @@ def _gaussian_update_exact(
     points: Tensor,
     target_values: Tensor,
     sample_values: Tensor,
-    noise_covariance: Optional[Union[Tensor, LinearOperator]] = None,
-    scale_tril: Optional[Union[Tensor, LinearOperator]] = None,
-    input_transform: Optional[TInputTransform] = None,
+    noise_covariance: Tensor | LinearOperator | None = None,
+    scale_tril: Tensor | LinearOperator | None = None,
+    input_transform: TInputTransform | None = None,
+    is_ensemble: bool = False,
 ) -> GeneralizedLinearPath:
-    # Prepare Cholesky factor of `Cov(y, y)` and noise sample values as needed
+    # Prepare Cholesky factor of ``Cov(y, y)`` and noise sample values as needed
     if isinstance(noise_covariance, (NoneType, ZeroLinearOperator)):
         scale_tril = kernel(points).cholesky() if scale_tril is None else scale_tril
     else:
@@ -91,7 +93,7 @@ def _gaussian_update_exact(
             else scale_tril
         )
 
-    # Solve for `Cov(y, y)^{-1}(Y - f(X) - ε)`
+    # Solve for ``Cov(y, y)^{-1}(Y - f(X) - ε)``
     errors = target_values - sample_values
     weight = torch.cholesky_solve(errors.unsqueeze(-1), scale_tril.to_dense())
 
@@ -101,7 +103,9 @@ def _gaussian_update_exact(
         points=points,
         input_transform=input_transform,
     )
-    return GeneralizedLinearPath(feature_map=feature_map, weight=weight.squeeze(-1))
+    return GeneralizedLinearPath(
+        feature_map=feature_map, weight=weight.squeeze(-1), is_ensemble=is_ensemble
+    )
 
 
 @GaussianUpdate.register(ExactGP, _GaussianLikelihoodBase)
@@ -110,10 +114,10 @@ def _gaussian_update_ExactGP(
     likelihood: _GaussianLikelihoodBase,
     *,
     sample_values: Tensor,
-    target_values: Optional[Tensor] = None,
-    points: Optional[Tensor] = None,
-    noise_covariance: Optional[Union[Tensor, LinearOperator]] = None,
-    scale_tril: Optional[Union[Tensor, LinearOperator]] = None,
+    target_values: Tensor | None = None,
+    points: Tensor | None = None,
+    noise_covariance: Tensor | LinearOperator | None = None,
+    scale_tril: Tensor | LinearOperator | None = None,
 ) -> GeneralizedLinearPath:
     if points is None:
         (points,) = get_train_inputs(model, transformed=True)
@@ -132,13 +136,14 @@ def _gaussian_update_ExactGP(
         noise_covariance=noise_covariance,
         scale_tril=scale_tril,
         input_transform=get_input_transform(model),
+        is_ensemble=is_ensemble(model),
     )
 
 
 @GaussianUpdate.register(ApproximateGPyTorchModel, (Likelihood, NoneType))
 def _gaussian_update_ApproximateGPyTorchModel(
     model: ApproximateGPyTorchModel,
-    likelihood: Optional[Likelihood],
+    likelihood: Likelihood | None,
     **kwargs: Any,
 ) -> GeneralizedLinearPath:
     return GaussianUpdate(
@@ -148,7 +153,7 @@ def _gaussian_update_ApproximateGPyTorchModel(
 
 @GaussianUpdate.register(ApproximateGP, (Likelihood, NoneType))
 def _gaussian_update_ApproximateGP(
-    model: ApproximateGP, likelihood: Optional[Likelihood], **kwargs: Any
+    model: ApproximateGP, likelihood: Likelihood | None, **kwargs: Any
 ) -> GeneralizedLinearPath:
     return GaussianUpdate(model, model.variational_strategy, **kwargs)
 
@@ -159,18 +164,18 @@ def _gaussian_update_ApproximateGP_VariationalStrategy(
     _: VariationalStrategy,
     *,
     sample_values: Tensor,
-    target_values: Optional[Tensor] = None,
-    noise_covariance: Optional[Union[Tensor, LinearOperator]] = None,
-    input_transform: Optional[InputTransform] = None,
+    target_values: Tensor | None = None,
+    noise_covariance: Tensor | LinearOperator | None = None,
+    input_transform: InputTransform | None = None,
     **ignore: Any,
 ) -> GeneralizedLinearPath:
-    # TODO: Account for jitter added by `psd_safe_cholesky`
+    # TODO: Account for jitter added by ``psd_safe_cholesky``
     if not isinstance(noise_covariance, (NoneType, ZeroLinearOperator)):
         raise NotImplementedError(
             f"`noise_covariance` argument not yet supported for {type(model)}."
         )
 
-    # Inducing points `Z` are assumed to live in transformed space
+    # Inducing points ``Z`` are assumed to live in transformed space
     batch_shape = model.covar_module.batch_shape
     v = model.variational_strategy
     Z = v.inducing_points
@@ -178,7 +183,7 @@ def _gaussian_update_ApproximateGP_VariationalStrategy(
         dtype=sample_values.dtype
     )
 
-    # Generate whitened inducing variables `u`, then location-scale transform
+    # Generate whitened inducing variables ``u``, then location-scale transform
     if target_values is None:
         u = v.variational_distribution.rsample(
             sample_values.shape[: sample_values.ndim - len(batch_shape) - 1],
@@ -192,4 +197,5 @@ def _gaussian_update_ApproximateGP_VariationalStrategy(
         sample_values=sample_values,
         scale_tril=L,
         input_transform=input_transform,
+        is_ensemble=is_ensemble(model),
     )

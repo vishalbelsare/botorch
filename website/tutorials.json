@@ -1,14 +1,4 @@
 {
-  "Using BoTorch with Ax": [
-    {
-      "id": "custom_botorch_model_in_ax",
-      "title": "Using a custom BoTorch model"
-    },
-    {
-      "id": "custom_acquisition",
-      "title": "Writing a custom acquisition function"
-    }
-  ],
   "Full Optimization Loops": [
     {
       "id": "closed_loop_botorch_only",
@@ -53,6 +43,14 @@
     {
       "id": "thompson_sampling",
       "title": "Bayesian optimization with large-scale Thompson sampling"
+    },
+    {
+      "id": "ibnn_bo",
+      "title": "Bayesian optimization with infinite-width neural networks"
+    },
+    {
+      "id": "custom_model",
+      "title": "Writing a custom model with the Model and Posterior Interfaces"
     }
   ],
   "Multi-Objective Bayesian Optimization": [
@@ -74,6 +72,10 @@
     }
   ],
   "Bite-Sized Tutorials": [
+    {
+      "id": "custom_acquisition",
+      "title": "Implementing a custom acquisition function"
+    },
     {
       "id": "fit_model_with_torch_optimizer",
       "title": "Fitting a model using torch.optim"
@@ -121,6 +123,20 @@
     {
       "id": "information_theoretic_acquisition_functions",
       "title": "Information-theoretic acquisition functions"
+    }
+  ],
+  "Gaussian Process Models": [
+    {
+      "id": "orthogonal_additive_gp",
+      "title": "Interpretable Modeling with the Orthogonal Additive Gaussian Process"
+    },
+    {
+      "id": "relevance_pursuit_robust_regression",
+      "title": "Robust Gaussian Processes via Relevance Pursuit"
+    },
+    {
+      "id": "empirical_gaussian_processes",
+      "title": "Empirical Gaussian Processes"
     }
   ],
   "Advanced Usage": [

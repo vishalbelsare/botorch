@@ -5,7 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import itertools
+import warnings
 from copy import deepcopy
+from random import randint
 
 import torch
 from botorch.models.transforms.outcome import (
@@ -15,14 +17,17 @@ from botorch.models.transforms.outcome import (
     OutcomeTransform,
     Power,
     Standardize,
+    StratifiedStandardize,
 )
 from botorch.models.transforms.utils import (
     norm_to_lognorm_mean,
     norm_to_lognorm_variance,
 )
 from botorch.posteriors import GPyTorchPosterior, TransformedPosterior
+from botorch.posteriors.fully_bayesian import GaussianMixturePosterior
 from botorch.utils.testing import BotorchTestCase
 from gpytorch.distributions import MultitaskMultivariateNormal, MultivariateNormal
+from gpytorch.settings import min_variance
 from linear_operator.operators import (
     BlockDiagLinearOperator,
     DenseLinearOperator,
@@ -290,7 +295,6 @@ class TestOutcomeTransforms(BotorchTestCase):
 
         # test transforming a subset of outcomes
         for batch_shape, dtype in itertools.product(batch_shapes, dtypes):
-
             m = 2
             outputs = [-1]
 
@@ -352,6 +356,55 @@ class TestOutcomeTransforms(BotorchTestCase):
             with self.assertRaises(NotImplementedError):
                 tf.untransform_posterior(None)
 
+    def test_standardize_untransform_gaussian_mixture_posterior(self) -> None:
+        """Test Standardize.untransform_posterior with GaussianMixturePosterior.
+
+        Verifies that when a GaussianMixturePosterior (from ensemble/fully Bayesian
+        models) is passed to Standardize.untransform_posterior, the return type is
+        GaussianMixturePosterior (not TransformedPosterior), and mixture_mean/
+        mixture_variance are accessible and correctly rescaled.
+        """
+
+        # Create a batched MVN simulating MCMC samples: num_mcmc x n x 1
+        num_mcmc, n = 5, 10
+        mean = torch.randn(num_mcmc, n, 1)
+        var = torch.rand(num_mcmc, n, 1).clamp(min=0.01)
+        mvn = MultivariateNormal(
+            mean=mean.squeeze(-1),
+            covariance_matrix=DiagLinearOperator(var.squeeze(-1)),
+        )
+        gmp = GaussianMixturePosterior(distribution=mvn)
+
+        # Verify mixture stats are available before untransform
+        self.assertEqual(gmp.mixture_mean.shape, torch.Size([n, 1]))
+
+        # Fit a Standardize transform
+        Y = torch.randn(n, 1)
+        tf = Standardize(m=1)
+        tf.train()
+        tf(Y)
+        tf.eval()
+
+        # Untransform should preserve the GaussianMixturePosterior type
+        result = tf.untransform_posterior(gmp)
+        self.assertIsInstance(result, GaussianMixturePosterior)
+        self.assertNotIsInstance(result, TransformedPosterior)
+
+        # Per-member statistics should be accessible
+        self.assertEqual(result.mean.shape, torch.Size([num_mcmc, n, 1]))
+        self.assertEqual(result.variance.shape, torch.Size([num_mcmc, n, 1]))
+
+        # Mixture statistics should be accessible
+        self.assertEqual(result.mixture_mean.shape, torch.Size([n, 1]))
+        self.assertEqual(result.mixture_variance.shape, torch.Size([n, 1]))
+        self.assertTrue((result.mixture_variance > 0).all())
+
+        # Verify mean is correctly rescaled: result.mean ≈ stdvs * input.mean + means
+        expected_mean = tf.means.squeeze(-1) + tf.stdvs.squeeze(-1) * mean.squeeze(-1)
+        self.assertAllClose(
+            result.mean.squeeze(-1), expected_mean, rtol=1e-5, atol=1e-5
+        )
+
     def test_standardize_state_dict(self):
         for m in (1, 2):
             with self.subTest(m=2):
@@ -366,6 +419,204 @@ class TestOutcomeTransforms(BotorchTestCase):
                 new_transform.load_state_dict(state_dict)
                 self.assertTrue(new_transform._is_trained)
 
+    def test_stratified_standardize(self):
+        n = 5
+        seed = randint(0, 100)
+        torch.manual_seed(seed)
+        for (
+            dtype,
+            batch_shape,
+            task_values_in_data,
+            all_task_values,
+        ) in itertools.product(
+            (torch.float, torch.double),
+            (torch.Size([]), torch.Size([3])),
+            (
+                torch.tensor([0, 1], dtype=torch.long, device=self.device),
+                torch.tensor([0, 3], dtype=torch.long, device=self.device),
+            ),
+            (
+                None,
+                torch.tensor([0, 1, 3], dtype=torch.long, device=self.device),
+            ),
+        ):
+            if all_task_values is None:
+                all_task_values = task_values_in_data
+            torch.manual_seed(seed)
+            tval = task_values_in_data[1].item()
+            X = torch.rand(*batch_shape, n, 2, dtype=dtype, device=self.device)
+            X[..., -1] = torch.tensor(
+                [0, tval, 0, tval, 0], dtype=dtype, device=self.device
+            )
+            Y = torch.randn(*batch_shape, n, 1, dtype=dtype, device=self.device)
+            Yvar = torch.rand(*batch_shape, n, 1, dtype=dtype, device=self.device)
+            strata_tf = StratifiedStandardize(
+                all_task_values=all_task_values,
+                stratification_idx=-1,
+                batch_shape=batch_shape,
+            )
+            tf_Y, tf_Yvar = strata_tf(Y=Y, Yvar=Yvar, X=X)
+            mask0 = X[..., -1] == 0
+            mask1 = ~mask0
+            Y0 = Y[mask0].view(*batch_shape, -1, 1)
+            Yvar0 = Yvar[mask0].view(*batch_shape, -1, 1)
+            X0 = X[mask0].view(*batch_shape, -1, 1)
+            Y1 = Y[mask1].view(*batch_shape, -1, 1)
+            Yvar1 = Yvar[mask1].view(*batch_shape, -1, 1)
+            X1 = X[mask1].view(*batch_shape, -1, 1)
+            tf0 = Standardize(m=1, batch_shape=batch_shape)
+            tf_Y0, tf_Yvar0 = tf0(Y=Y0, Yvar=Yvar0, X=X0)
+            tf1 = Standardize(m=1, batch_shape=batch_shape)
+            tf_Y1, tf_Yvar1 = tf1(Y=Y1, Yvar=Yvar1, X=X1)
+            # Get the mapped indices for the tasks in our data
+            # Task 0 always maps to index 0 (first in all_task_values)
+            idx0 = (all_task_values == 0).nonzero(as_tuple=True)[0].item()
+            # Task tval maps to its position in all_task_values
+            idx1 = (all_task_values == tval).nonzero(as_tuple=True)[0].item()
+            # check that stratified means are expected
+            self.assertAllClose(strata_tf.means[..., idx0 : idx0 + 1, :], tf0.means)
+            self.assertAllClose(strata_tf.means[..., idx1 : idx1 + 1, :], tf1.means)
+            self.assertAllClose(strata_tf.stdvs[..., idx0 : idx0 + 1, :], tf0.stdvs)
+            self.assertAllClose(strata_tf.stdvs[..., idx1 : idx1 + 1, :], tf1.stdvs)
+            # check the transformed values
+            self.assertAllClose(tf_Y0, tf_Y[mask0].view(*batch_shape, -1, 1))
+            self.assertAllClose(tf_Y1, tf_Y[mask1].view(*batch_shape, -1, 1))
+            self.assertAllClose(tf_Yvar0, tf_Yvar[mask0].view(*batch_shape, -1, 1))
+            self.assertAllClose(tf_Yvar1, tf_Yvar[mask1].view(*batch_shape, -1, 1))
+            untf_Y, untf_Yvar = strata_tf.untransform(Y=tf_Y, Yvar=tf_Yvar, X=X)
+            # test untransform
+            if dtype == torch.float32:
+                # defaults are 1e-5, 1e-8
+                tols = {"rtol": 2e-5, "atol": 8e-8}
+            else:
+                tols = {}
+            self.assertAllClose(Y, untf_Y, **tols)
+            self.assertAllClose(Yvar, untf_Yvar)
+            # check strata_mapping
+            # When all_task_values != [0, 1, ..., n-1], get_task_value_remapping
+            # creates a mapper where all tasks in all_task_values map to contiguous
+            # integers and others map to NaN
+            contiguous_range = torch.arange(
+                len(all_task_values), dtype=torch.long, device=self.device
+            )
+            if not torch.equal(all_task_values, contiguous_range):
+                # strata_mapping has size max(all_task_values) + 1
+                expected_strata_mapping = torch.full(
+                    (int(all_task_values.max().item()) + 1,),
+                    float("nan"),
+                    dtype=strata_tf.strata_mapping.dtype,
+                    device=self.device,
+                )
+                # all tasks in all_task_values are mapped to 0, 1, ... in order
+                for i, task_val in enumerate(all_task_values):
+                    expected_strata_mapping[task_val] = float(i)
+                # Check finite values match
+                self.assertTrue(
+                    torch.equal(
+                        strata_tf.strata_mapping[
+                            ~torch.isnan(strata_tf.strata_mapping)
+                        ],
+                        expected_strata_mapping[~torch.isnan(expected_strata_mapping)],
+                    )
+                )
+                # Check NaN positions match
+                self.assertTrue(
+                    torch.equal(
+                        torch.isnan(strata_tf.strata_mapping),
+                        torch.isnan(expected_strata_mapping),
+                    )
+                )
+            else:
+                self.assertTrue(torch.equal(strata_tf.strata_mapping, all_task_values))
+
+            # test untransform_posterior
+            for lazy in (True, False):
+                shape = batch_shape + torch.Size([n, 1])
+                posterior = _get_test_posterior(
+                    shape,
+                    device=self.device,
+                    dtype=dtype,
+                    interleaved=False,
+                    lazy=lazy,
+                )
+                p_utf = strata_tf.untransform_posterior(posterior, X=X)
+                self.assertEqual(p_utf.device.type, self.device.type)
+                self.assertEqual(p_utf.dtype, dtype)
+                strata_means, strata_stdvs, _ = strata_tf._get_per_input_means_stdvs(
+                    X=X, include_stdvs_sq=False
+                )
+                mean_expected = strata_means + strata_stdvs * posterior.mean
+                expected_raw_variance = (strata_stdvs**2 * posterior.variance).squeeze()
+                self.assertAllClose(p_utf.mean, mean_expected)
+                # The variance will be clamped to a minimum (typically 1e-6), so
+                # check both the raw values and clamped values
+                raw_variance = p_utf.mvn.lazy_covariance_matrix.diagonal(
+                    dim1=-1, dim2=2
+                )
+                self.assertAllClose(raw_variance, expected_raw_variance)
+                expected_clamped_variance = expected_raw_variance.clamp(
+                    min=min_variance.value(dtype=raw_variance.dtype)
+                ).unsqueeze(-1)
+                self.assertAllClose(p_utf.variance, expected_clamped_variance)
+                samples = p_utf.rsample()
+                self.assertEqual(samples.shape, torch.Size([1]) + shape)
+                samples = p_utf.rsample(sample_shape=torch.Size([4]))
+                self.assertEqual(samples.shape, torch.Size([4]) + shape)
+                samples2 = p_utf.rsample(sample_shape=torch.Size([4, 2]))
+                self.assertEqual(samples2.shape, torch.Size([4, 2]) + shape)
+
+        # test exception if X is None
+        strata_tf = StratifiedStandardize(
+            all_task_values=all_task_values,
+            stratification_idx=-1,
+            batch_shape=batch_shape,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "X is required for StratifiedStandardize."
+        ):
+            strata_tf(Y=Y, Yvar=Yvar)
+        with self.assertRaisesRegex(
+            ValueError, "X is required for StratifiedStandardize."
+        ):
+            strata_tf.untransform_posterior(posterior)
+        with self.assertRaisesRegex(
+            ValueError, "X is required for StratifiedStandardize."
+        ):
+            strata_tf.untransform(Y=tf_Y)
+        with self.assertRaises(NotImplementedError):
+            strata_tf.subset_output(idcs=[0])
+
+        # test warning raised when predicting on tasks not in all_task_values
+        with self.subTest("warning for unknown task predictions"):
+            # Create a transform with all_task_values [0, 1, 3] (non-contiguous
+            # so that a proper mapper is created)
+            all_tasks = torch.tensor([0, 1, 3], dtype=torch.long, device=self.device)
+            strata_tf = StratifiedStandardize(
+                all_task_values=all_tasks,
+                stratification_idx=-1,
+            )
+            # Train the transform
+            X_train = torch.tensor([[0.5, 0.0], [0.5, 1.0]], device=self.device)
+            Y_train = torch.tensor([[1.0], [2.0]], device=self.device)
+            strata_tf(Y=Y_train, Yvar=None, X=X_train)
+            strata_tf.eval()
+
+            # Create test input with a task NOT in all_task_values (task 2)
+            X_test = torch.tensor([[0.5, 2.0]], device=self.device)
+
+            # Check that warning is raised when predicting on unknown task
+            # and verify identity transform values (mean=0, stdvs=stdvs_sq=1)
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                means, stdvs, stdvs_sq = strata_tf._get_per_input_means_stdvs(
+                    X=X_test, include_stdvs_sq=True
+                )
+                self.assertEqual(len(w), 1)
+                self.assertIn("not observed during training", str(w[0].message))
+            self.assertEqual(means.item(), 0.0)
+            self.assertEqual(stdvs.item(), 1.0)
+            self.assertEqual(stdvs_sq.item(), 1.0)
+
     def test_log(self):
         ms = (1, 2)
         batch_shapes = (torch.Size(), torch.Size([2]))
@@ -373,7 +624,6 @@ class TestOutcomeTransforms(BotorchTestCase):
 
         # test transform and untransform
         for m, batch_shape, dtype in itertools.product(ms, batch_shapes, dtypes):
-
             # test init
             tf = Log()
             self.assertTrue(tf.training)
@@ -397,17 +647,23 @@ class TestOutcomeTransforms(BotorchTestCase):
             self.assertTrue(torch.equal(Y_tf[..., [0]], Y_tf_subset))
             self.assertIsNone(Yvar_tf_subset)
 
-            # test error if observation noise present
+            # test with observation noise (delta method)
             tf = Log()
-            Y = torch.rand(*batch_shape, 3, m, device=self.device, dtype=dtype)
+            Y = 1e-2 + torch.rand(*batch_shape, 3, m, device=self.device, dtype=dtype)
             Yvar = 1e-8 + torch.rand(
                 *batch_shape, 3, m, device=self.device, dtype=dtype
             )
-            with self.assertRaises(NotImplementedError):
-                tf(Y, Yvar)
+            Y_tf, Yvar_tf = tf(Y, Yvar)
+            self.assertTrue(tf.training)
+            self.assertAllClose(Y_tf, torch.log(Y))
+            # Delta method: Var[log(Y)] ≈ Var[Y] / Y^2
+            self.assertAllClose(Yvar_tf, Yvar / Y.pow(2))
             tf.eval()
-            with self.assertRaises(NotImplementedError):
-                tf.untransform(Y, Yvar)
+            self.assertFalse(tf.training)
+            Y_utf, Yvar_utf = tf.untransform(Y_tf, Yvar_tf)
+            self.assertAllClose(Y_utf, Y)
+            # Reverse: Var[Y] = Var[log(Y)] * exp(2 * log(Y)) = Var[log(Y)] * Y^2
+            self.assertAllClose(Yvar_utf, Yvar)
 
             # untransform_posterior
             tf = Log()
@@ -435,7 +691,6 @@ class TestOutcomeTransforms(BotorchTestCase):
 
         # test transforming a subset of outcomes
         for batch_shape, dtype in itertools.product(batch_shapes, dtypes):
-
             m = 2
             outputs = [-1]
 
@@ -462,14 +717,22 @@ class TestOutcomeTransforms(BotorchTestCase):
             with self.assertRaises(NotImplementedError):
                 tf_subset = tf.subset_output(idcs=[0])
 
-            # with observation noise
+            # with observation noise (subset of outputs)
             tf = Log(outputs=outputs)
-            Y = torch.rand(*batch_shape, 3, m, device=self.device, dtype=dtype)
+            Y = 1e-2 + torch.rand(*batch_shape, 3, m, device=self.device, dtype=dtype)
             Yvar = 1e-8 + torch.rand(
                 *batch_shape, 3, m, device=self.device, dtype=dtype
             )
-            with self.assertRaises(NotImplementedError):
-                tf(Y, Yvar)
+            Y_tf, Yvar_tf = tf(Y, Yvar)
+            # output 0 should be untransformed, output 1 should be transformed
+            self.assertAllClose(Y_tf[..., 0], Y[..., 0])
+            self.assertAllClose(Y_tf[..., 1], torch.log(Y[..., 1]))
+            self.assertAllClose(Yvar_tf[..., 0], Yvar[..., 0])
+            self.assertAllClose(Yvar_tf[..., 1], Yvar[..., 1] / Y[..., 1].pow(2))
+            tf.eval()
+            Y_utf, Yvar_utf = tf.untransform(Y_tf, Yvar_tf)
+            self.assertAllClose(Y_utf, Y)
+            self.assertAllClose(Yvar_utf, Yvar)
 
             # error on untransform_posterior
             with self.assertRaises(NotImplementedError):
@@ -490,7 +753,6 @@ class TestOutcomeTransforms(BotorchTestCase):
 
         # test transform and untransform
         for m, batch_shape, dtype in itertools.product(ms, batch_shapes, dtypes):
-
             # test init
             tf1 = Log()
             tf2 = Standardize(m=m, batch_shape=batch_shape)
@@ -524,13 +786,17 @@ class TestOutcomeTransforms(BotorchTestCase):
             with self.assertRaises(RuntimeError):
                 tf.subset_output(idcs=[0, 1, 2])
 
-            # test error if observation noise present
-            Y = torch.rand(*batch_shape, 3, m, device=self.device, dtype=dtype)
+            # test observation noise is propagated through chained transform
+            Y = 1e-2 + torch.rand(*batch_shape, 3, m, device=self.device, dtype=dtype)
             Yvar = 1e-8 + torch.rand(
                 *batch_shape, 3, m, device=self.device, dtype=dtype
             )
-            with self.assertRaises(NotImplementedError):
-                tf(Y, Yvar)
+            tf1 = Log()
+            tf2 = Standardize(m=m, batch_shape=batch_shape)
+            tf = ChainedOutcomeTransform(log=tf1, standardize=tf2)
+            Y_tf, Yvar_tf = tf(Y, Yvar)
+            self.assertEqual(Y_tf.shape, Y.shape)
+            self.assertEqual(Yvar_tf.shape, Yvar.shape)
 
             # untransform_posterior
             tf1 = Log()
@@ -583,15 +849,19 @@ class TestOutcomeTransforms(BotorchTestCase):
             torch.allclose(Y_utf, Y)
             self.assertIsNone(Yvar_utf)
 
-            # with observation noise
-            Y = torch.rand(*batch_shape, 3, m, device=self.device, dtype=dtype)
+            # with observation noise (subset outputs)
+            Y = 1e-2 + torch.rand(*batch_shape, 3, m, device=self.device, dtype=dtype)
             Yvar = 1e-8 + torch.rand(
                 *batch_shape, 3, m, device=self.device, dtype=dtype
             )
-            with self.assertRaises(NotImplementedError):
-                tf(Y, Yvar)
+            tf1 = Log(outputs=outputs)
+            tf2 = Standardize(m=m, outputs=outputs, batch_shape=batch_shape)
+            tf = ChainedOutcomeTransform(log=tf1, standardize=tf2)
+            Y_tf, Yvar_tf = tf(Y, Yvar)
+            self.assertEqual(Y_tf.shape, Y.shape)
+            self.assertEqual(Yvar_tf.shape, Yvar.shape)
 
-            # error on untransform_posterior
+            # error on untransform_posterior (subset outputs not supported)
             with self.assertRaises(NotImplementedError):
                 tf.untransform_posterior(None)
 
@@ -605,7 +875,6 @@ class TestOutcomeTransforms(BotorchTestCase):
 
         # test transform and untransform
         for m, batch_shape, dtype in itertools.product(ms, batch_shapes, dtypes):
-
             # test init
             tf = Power(power=power)
             self.assertTrue(tf.training)

@@ -10,16 +10,20 @@ Utilities for acquisition functions.
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional, Union
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
+import botorch.acquisition.logei as logei
+import botorch.acquisition.monte_carlo as monte_carlo
+import botorch.acquisition.multi_objective.logei as moo_logei
+import botorch.acquisition.multi_objective.monte_carlo as moo_monte_carlo
 import torch
 
-from botorch.acquisition import logei, monte_carlo
-from botorch.acquisition.multi_objective import (
-    logei as moo_logei,
-    monte_carlo as moo_monte_carlo,
-)
+if TYPE_CHECKING:
+    from botorch.acquisition.monte_carlo import MCAcquisitionFunction
+
 from botorch.acquisition.objective import MCAcquisitionObjective, PosteriorTransform
+from botorch.acquisition.thompson_sampling import PathwiseThompsonSampling
 from botorch.acquisition.utils import compute_best_feasible_objective
 from botorch.models.model import Model
 from botorch.sampling.get_sampler import get_sampler
@@ -35,37 +39,37 @@ def get_acquisition_function(
     model: Model,
     objective: MCAcquisitionObjective,
     X_observed: Tensor,
-    posterior_transform: Optional[PosteriorTransform] = None,
-    X_pending: Optional[Tensor] = None,
-    constraints: Optional[List[Callable[[Tensor], Tensor]]] = None,
-    eta: Optional[Union[Tensor, float]] = 1e-3,
+    posterior_transform: PosteriorTransform | None = None,
+    X_pending: Tensor | None = None,
+    constraints: list[Callable[[Tensor], Tensor]] | None = None,
+    eta: Tensor | float | None = 1e-3,
     mc_samples: int = 512,
-    seed: Optional[int] = None,
+    seed: int | None = None,
     *,
     # optional parameters that are only needed for certain acquisition functions
     tau: float = 1e-3,
     prune_baseline: bool = True,
-    marginalize_dim: Optional[int] = None,
-    cache_root: bool = True,
-    beta: Optional[float] = None,
-    ref_point: Union[None, List[float], Tensor] = None,
-    Y: Optional[Tensor] = None,
+    marginalize_dim: int | None = None,
+    cache_root: bool | None = None,
+    beta: float | None = None,
+    ref_point: None | list[float] | Tensor = None,
+    Y: Tensor | None = None,
     alpha: float = 0.0,
-) -> monte_carlo.MCAcquisitionFunction:
+) -> MCAcquisitionFunction:
     r"""Convenience function for initializing botorch acquisition functions.
 
     Args:
         acquisition_function_name: Name of the acquisition function.
         model: A fitted model.
         objective: A MCAcquisitionObjective.
-        X_observed: A `m1 x d`-dim Tensor of `m1` design points that have
+        X_observed: A ``m1 x d``-dim Tensor of ``m1`` design points that have
             already been observed.
         posterior_transform: A PosteriorTransform (optional).
-        X_pending: A `m2 x d`-dim Tensor of `m2` design points whose evaluation
+        X_pending: A ``m2 x d``-dim Tensor of ``m2`` design points whose evaluation
             is pending.
         constraints: A list of callables, each mapping a Tensor of dimension
-            `sample_shape x batch-shape x q x m` to a Tensor of dimension
-            `sample_shape x batch-shape x q`, where negative values imply
+            ``sample_shape x batch-shape x q x m`` to a Tensor of dimension
+            ``sample_shape x batch-shape x q``, where negative values imply
             feasibility. Used for all acquisition functions except qSR and qUCB.
         eta: The temperature parameter for the sigmoid function used for the
             differentiable approximation of the constraints. In case of a float the
@@ -86,6 +90,13 @@ def get_acquisition_function(
         >>> obj = LinearMCObjective(weights=torch.tensor([1.0, 2.0]))
         >>> acqf = get_acquisition_function("qEI", model, obj, train_X)
     """
+    # thompson sampling does not need a sampler, so we do this first
+    if acquisition_function_name == "pTS":
+        return PathwiseThompsonSampling(
+            model=model,
+            objective=objective,
+            posterior_transform=posterior_transform,
+        )
     # initialize the sampler
     sampler = get_sampler(
         posterior=model.posterior(X_observed[:1]),
@@ -143,6 +154,16 @@ def get_acquisition_function(
             X_pending=X_pending,
             tau=tau,
             constraints=constraints,
+            eta=eta,
+        )
+    elif acquisition_function_name == "qLogPF":
+        return logei.qLogProbabilityOfFeasibility(
+            model=model,
+            constraints=constraints,
+            sampler=sampler,
+            objective=objective,
+            posterior_transform=posterior_transform,
+            X_pending=X_pending,
             eta=eta,
         )
     elif acquisition_function_name in ["qNEI", "qLogNEI"]:

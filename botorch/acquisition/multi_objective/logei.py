@@ -6,16 +6,30 @@
 r"""
 Multi-objective variants of the LogEI family of acquisition functions, see
 [Ament2023logei]_ for details.
+
+A fused C++ kernel is available that accelerates the inner loop of
+``_compute_log_qehvi`` by ~1.5-3x on CPU.  It is loaded lazily on first
+acquisition function construction — either from a pre-compiled extension
+(Buck builds) or via JIT compilation (pip installs).  If loading fails the
+pure-Python implementation is used transparently.
+
+For pip installs, JIT compilation requires a C++ compiler (``gcc`` or
+``clang``) to be available on the system.  The ``ninja`` build system is
+included as a dependency.  The kernel is compiled once on first use (~7 s)
+and cached by PyTorch for subsequent imports.
 """
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional, Tuple, Union
+import os
+import warnings
+from collections.abc import Callable
 
 import torch
 from botorch.acquisition.logei import TAU_MAX, TAU_RELU
-from botorch.acquisition.multi_objective import MultiObjectiveMCAcquisitionFunction
+from botorch.acquisition.multi_objective.base import MultiObjectiveMCAcquisitionFunction
 from botorch.acquisition.multi_objective.objective import MCMultiOutputObjective
+from botorch.logging import logger
 from botorch.models.model import Model
 from botorch.sampling.base import MCSampler
 from botorch.utils.multi_objective.box_decompositions.non_dominated import (
@@ -37,30 +51,139 @@ from botorch.utils.safe_math import (
     smooth_amin,
 )
 from botorch.utils.transforms import (
+    average_over_ensemble_models,
     concatenate_pending_points,
-    is_ensemble,
-    match_batch_shape,
     t_batch_mode_transform,
 )
 from torch import Tensor
+
+_C = None  # Fused C++ kernel module, loaded lazily by _try_load_fused_kernel().
+_load_attempted = False  # Sentinel to avoid retrying after a failed load.
+_FUSED_MAX_I = 32  # Must match MAX_I in logei_fused.cpp.
+
+
+def _try_load_fused_kernel() -> None:
+    """Load the fused C++ kernel if available, storing it in module-level ``_C``.
+
+    Tries the pre-compiled Buck extension first, then falls back to JIT
+    compilation for pip/source installs.  Called from ``__init__`` of the
+    acquisition functions so the cost is deferred until actually needed.
+    Only attempts loading once; subsequent calls are no-ops.
+    """
+    global _C, _load_attempted
+    if _load_attempted:
+        return
+    _load_attempted = True
+    try:  # pragma: no cover
+        import logei_fused_ext
+
+        _C = logei_fused_ext
+        return
+    except ImportError:
+        pass
+    try:
+        from torch.utils.cpp_extension import load as _load_ext
+
+        _cpp_src = os.path.join(
+            os.path.dirname(__file__), os.pardir, os.pardir, "csrc", "logei_fused.cpp"
+        )
+        _C = _load_ext(
+            name="logei_fused_ext",
+            sources=[os.path.abspath(_cpp_src)],
+            extra_cflags=["-O3", "-march=native"],
+            verbose=False,
+        )
+    except Exception as exc:  # pragma: no cover
+        warnings.warn(
+            f"Failed to compile fused qLogEHVI C++ extension: {exc}. "
+            "Falling back to the pure-Python implementation. "
+            "To get ~3x speedup, ensure a C++ compiler and the `ninja` "
+            "package are installed.",
+            stacklevel=2,
+        )
+        logger.debug("C++ extension compilation error", exc_info=True)
+
+
+class _FusedLogAreas(torch.autograd.Function):
+    """Custom autograd function wrapping the fused C++ kernel.
+
+    Fuses steps 1-4 of ``_compute_log_qehvi`` into a single C++ call.
+    In the pure-Python path these steps are:
+
+    1. ``_log_improvement`` — log smoothed ReLU of (obj - cell_lower),
+    2. ``_smooth_min`` — smooth minimum over subset elements,
+    3. ``_log_cell_lengths`` — smooth minimum with log cell side lengths,
+    4. ``sum`` over objectives to get log areas.
+    """
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        obj_subsets: Tensor,
+        cell_lower: Tensor,
+        cell_upper: Tensor,
+        tau_relu: float,
+        tau_max: float,
+    ) -> Tensor:
+        batch_shape = obj_subsets.shape[:-3]
+        B = max(1, int(torch.Size(batch_shape).numel()))
+        obj_flat = obj_subsets.reshape(B, *obj_subsets.shape[-3:])
+
+        # Reshape cell bounds to 3-D (B_cells, nc, m) for the C++ kernel.
+        # Non-batched (2-D) bounds are left as-is; the kernel handles both.
+        nc, m_cells = cell_lower.shape[-2], cell_lower.shape[-1]
+        if cell_lower.ndim > 2:
+            cell_lower = cell_lower.reshape(-1, nc, m_cells)
+            cell_upper = cell_upper.reshape(-1, nc, m_cells)
+
+        result = _C.forward(obj_flat, cell_lower, cell_upper, tau_relu, tau_max)
+
+        ctx.save_for_backward(obj_flat, cell_lower, cell_upper)
+        ctx.tau_relu = tau_relu
+        ctx.tau_max = tau_max
+        ctx.orig_shape = obj_subsets.shape
+
+        return result.reshape(*batch_shape, result.shape[-2], result.shape[-1])
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_output: Tensor,
+    ) -> tuple[Tensor | None, ...]:
+        obj_flat, cell_lower, cell_upper = ctx.saved_tensors
+        B = obj_flat.shape[0]
+
+        grad_flat = grad_output.reshape(B, *grad_output.shape[-2:])
+
+        grad_obj = _C.backward(
+            grad_flat,
+            obj_flat,
+            cell_lower,
+            cell_upper,
+            ctx.tau_relu,
+            ctx.tau_max,
+        )
+
+        # Gradients for: obj_subsets, cell_lower, cell_upper, tau_relu, tau_max.
+        # Only obj_subsets needs a gradient; the rest are non-differentiable.
+        return grad_obj.reshape(ctx.orig_shape), None, None, None, None
 
 
 class qLogExpectedHypervolumeImprovement(
     MultiObjectiveMCAcquisitionFunction, SubsetIndexCachingMixin
 ):
-
     _log: bool = True
 
     def __init__(
         self,
         model: Model,
-        ref_point: Union[List[float], Tensor],
+        ref_point: list[float] | Tensor,
         partitioning: NondominatedPartitioning,
-        sampler: Optional[MCSampler] = None,
-        objective: Optional[MCMultiOutputObjective] = None,
-        constraints: Optional[List[Callable[[Tensor], Tensor]]] = None,
-        X_pending: Optional[Tensor] = None,
-        eta: Optional[Union[Tensor, float]] = 1e-2,
+        sampler: MCSampler | None = None,
+        objective: MCMultiOutputObjective | None = None,
+        constraints: list[Callable[[Tensor], Tensor]] | None = None,
+        X_pending: Tensor | None = None,
+        eta: Tensor | float = 1e-2,
         fat: bool = True,
         tau_relu: float = TAU_RELU,
         tau_max: float = TAU_MAX,
@@ -70,7 +193,7 @@ class qLogExpectedHypervolumeImprovement(
         See [Ament2023logei]_ for details and the methodology behind the LogEI family of
         acquisition function. Line-by-line differences to the original differentiable
         expected hypervolume formulation of [Daulton2020qehvi]_ are described via inline
-        comments in `forward`.
+        comments in ``forward``.
 
         Example:
             >>> model = SingleTaskGP(train_X, train_Y)
@@ -80,27 +203,27 @@ class qLogExpectedHypervolumeImprovement(
 
         Args:
             model: A fitted model.
-            ref_point: A list or tensor with `m` elements representing the reference
+            ref_point: A list or tensor with ``m`` elements representing the reference
                 point (in the outcome space) w.r.t. to which compute the hypervolume.
                 This is a reference point for the objective values (i.e. after
-                applying`objective` to the samples).
-            partitioning: A `NondominatedPartitioning` module that provides the non-
+                applying ``objective`` to the samples).
+            partitioning: A ``NondominatedPartitioning`` module that provides the non-
                 dominated front and a partitioning of the non-dominated space in hyper-
                 rectangles. If constraints are present, this partitioning must only
                 include feasible points.
             sampler: The sampler used to draw base samples. If not given,
-                a sampler is generated using `get_sampler`.
+                a sampler is generated using ``get_sampler``.
             objective: The MCMultiOutputObjective under which the samples are evaluated.
-                Defaults to `IdentityMultiOutputObjective()`.
+                Defaults to ``IdentityMultiOutputObjective()``.
             constraints: A list of callables, each mapping a Tensor of dimension
-                `sample_shape x batch-shape x q x m` to a Tensor of dimension
-                `sample_shape x batch-shape x q`, where negative values imply
+                ``sample_shape x batch-shape x q x m`` to a Tensor of dimension
+                ``sample_shape x batch-shape x q``, where negative values imply
                 feasibility. The acquisition function will compute expected feasible
                 hypervolume.
-            X_pending: A `batch_shape x m x d`-dim Tensor of `m` design points that have
-                points that have been submitted for function evaluation but have not yet
-                been evaluated. Concatenated into `X` upon forward call. Copied and set
-                to have no gradient.
+            X_pending: A ``batch_shape x m x d``-dim Tensor of ``m`` design
+                points that have points that have been submitted for function
+                evaluation but have not yet been evaluated. Concatenated into ``X``
+                upon forward call. Copied and set to have no gradient.
             eta: The temperature parameter for the sigmoid function used for the
                 differentiable approximation of the constraints. In case of a float the
                 same eta is used for every constraint in constraints. In case of a
@@ -110,11 +233,12 @@ class qLogExpectedHypervolumeImprovement(
             fat: Toggles the logarithmic / linear asymptotic behavior of the smooth
                 approximation to the ReLU and the maximum.
             tau_relu: Temperature parameter controlling the sharpness of the
-                approximation to the ReLU over the `q` candidate points. For further
-                details, see the comments above the definition of `TAU_RELU`.
+                approximation to the ReLU over the ``q`` candidate points. For further
+                details, see the comments above the definition of ``TAU_RELU``.
             tau_max: Temperature parameter controlling the sharpness of the
-                approximation to the `max` operator over the `q` candidate points.
-                For further details, see the comments above the definition of `TAU_MAX`.
+                approximation to the ``max`` operator over the ``q`` candidate points.
+                For further details, see the comments above the definition of
+                ``TAU_MAX``.
         """
         if len(ref_point) != partitioning.num_outcomes:
             raise ValueError(
@@ -143,16 +267,22 @@ class qLogExpectedHypervolumeImprovement(
         self.tau_relu = tau_relu
         self.tau_max = tau_max
         self.fat = fat
+        _try_load_fused_kernel()
 
-    def _compute_log_qehvi(self, samples: Tensor, X: Optional[Tensor] = None) -> Tensor:
+    def _compute_log_qehvi(self, samples: Tensor, X: Tensor | None = None) -> Tensor:
         r"""Compute the expected (feasible) hypervolume improvement given MC samples.
 
+        When the fused C++ kernel is available and the cell bounds are not
+        batched (the common case for ``qLogEHVI``), steps 1-4 of the inner
+        loop are replaced by a single fused call for ~1.5-3x speedup on CPU.
+        Otherwise the pure-Python path is used.
+
         Args:
-            samples: A `sample_shape x batch_shape x q' x m`-dim tensor of samples.
-            X: A `batch_shape x q x d`-dim tensor of inputs.
+            samples: A ``sample_shape x batch_shape x q' x m``-dim tensor of samples.
+            X: A ``batch_shape x q x d``-dim tensor of inputs.
 
         Returns:
-            A `batch_shape x (model_batch_shape)`-dim tensor of expected hypervolume
+            A ``batch_shape x (model_batch_shape)``-dim tensor of expected hypervolume
             improvement for each batch.
         """
         # Note that the objective may subset the outcomes (e.g. this will usually happen
@@ -170,7 +300,7 @@ class qLogExpectedHypervolumeImprovement(
         device = self.ref_point.device
         q_subset_indices = self.compute_q_subset_indices(q_out=q, device=device)
         batch_shape = obj.shape[:-2]  # mc_samples x batch_shape
-        # areas tensor is `mc_samples x batch_shape x num_cells x 2`-dim
+        # areas tensor is ``mc_samples x batch_shape x num_cells x 2``-dim
         log_areas_per_segment = torch.full(
             size=(
                 *batch_shape,
@@ -182,29 +312,66 @@ class qLogExpectedHypervolumeImprovement(
             device=device,
         )
 
+        # The fused C++ kernel supports non-batched (qLogEHVI) and batched
+        # (qLogNEHVI, fully Bayesian) cell bounds, with fat=True on CPU.
+        # When obj has extra t-batch dims that broadcast against the cell
+        # bounds, we expand cell bounds to match before flattening.
         cell_batch_ndim = self.cell_lower_bounds.ndim - 2
-        # conditionally adding mc_samples dim if cell_batch_ndim > 0
-        # adding ones to shape equal in number to to batch_shape_ndim - cell_batch_ndim
-        # adding cell_bounds batch shape w/o 1st dimension
-        sample_batch_view_shape = torch.Size(
-            [
-                batch_shape[0] if cell_batch_ndim > 0 else 1,
-                *[1 for _ in range(len(batch_shape) - max(cell_batch_ndim, 1))],
-                *self.cell_lower_bounds.shape[1:-2],
-            ]
-        )
-        view_shape = (
-            *sample_batch_view_shape,
-            self.cell_upper_bounds.shape[-2],  # num_cells
-            1,  # adding for q_choose_i dimension
-            self.cell_upper_bounds.shape[-1],  # num_objectives
+        use_fused = (
+            _C is not None
+            and self.fat
+            and obj.device.type == "cpu"
+            and q <= _FUSED_MAX_I
+            # An approximate box decomposition can have zero cells; there is
+            # nothing to fuse then and the Python path handles it directly.
+            and self.cell_lower_bounds.shape[-2] > 0
         )
 
+        if use_fused and cell_batch_ndim > 0:
+            # Expand cell bounds to match obj batch shape for 1:1 mapping.
+            # Insert 1-dims at t-batch positions, then expand + reshape to 3-D.
+            n_tbatch = len(batch_shape) - cell_batch_ndim
+            if n_tbatch > 0:
+                # cell shape: (mc, *model_batch, nc, m)
+                # target:     (mc, *t_batch, *model_batch, nc, m)
+                expand_shape = (
+                    self.cell_lower_bounds.shape[0],  # mc_samples
+                    *[1] * n_tbatch,  # 1s for t-batch dims
+                    *self.cell_lower_bounds.shape[1:],  # model_batch + nc + m
+                )
+                fused_cell_lower = self.cell_lower_bounds.view(expand_shape).expand(
+                    *batch_shape, *self.cell_lower_bounds.shape[-2:]
+                )
+                fused_cell_upper = self.cell_upper_bounds.view(expand_shape).expand(
+                    *batch_shape, *self.cell_upper_bounds.shape[-2:]
+                )
+            else:
+                fused_cell_lower = self.cell_lower_bounds
+                fused_cell_upper = self.cell_upper_bounds
+        elif use_fused:
+            fused_cell_lower = self.cell_lower_bounds
+            fused_cell_upper = self.cell_upper_bounds
+
+        if not use_fused:
+            # conditionally adding mc_samples dim if cell_batch_ndim > 0
+            # adding ones to shape equal in number to batch_shape_ndim -
+            # cell_batch_ndim
+            # adding cell_bounds batch shape w/o 1st dimension
+            sample_batch_view_shape = torch.Size(
+                [
+                    batch_shape[0] if cell_batch_ndim > 0 else 1,
+                    *[1 for _ in range(len(batch_shape) - max(cell_batch_ndim, 1))],
+                    *self.cell_lower_bounds.shape[1:-2],
+                ]
+            )
+            view_shape = (
+                *sample_batch_view_shape,
+                self.cell_upper_bounds.shape[-2],  # num_cells
+                1,  # adding for q_choose_i dimension
+                self.cell_upper_bounds.shape[-1],  # num_objectives
+            )
+
         for i in range(1, self.q_out + 1):
-            # TODO: we could use batches to compute (q choose i) and (q choose q-i)
-            # simultaneously since subsets of size i and q-i have the same number of
-            # elements. This would decrease the number of iterations, but increase
-            # memory usage.
             q_choose_i = q_subset_indices[f"q_choose_{i}"]  # q_choose_i x i
             # this tensor is mc_samples x batch_shape x i x q_choose_i x m
             obj_subsets = obj.index_select(dim=-2, index=q_choose_i.view(-1))
@@ -212,30 +379,33 @@ class qLogExpectedHypervolumeImprovement(
                 obj.shape[:-2] + q_choose_i.shape + obj.shape[-1:]
             )  # mc_samples x batch_shape x q_choose_i x i x m
 
-            # NOTE: the order of operations in non-log _compute_qehvi is 3), 1), 2).
-            # since 3) moved above 1), _log_improvement adds another Tensor dimension
-            # that keeps track of num_cells.
+            if use_fused:
+                # Fused C++ kernel: steps 1-4 in one pass.
+                # Input:  (*batch, n_subsets, i, m)
+                # Output: (*batch, num_cells, n_subsets)
+                log_areas_i = _FusedLogAreas.apply(
+                    obj_subsets,
+                    fused_cell_lower,
+                    fused_cell_upper,
+                    self.tau_relu,
+                    self.tau_max,
+                )
+            else:
+                # Pure-Python path (steps 1-4).
+                # 1) computes log smoothed improvement over cell lower bounds.
+                log_improvement_i = self._log_improvement(obj_subsets, view_shape)
 
-            # 1) computes log smoothed improvement over the cell lower bounds.
-            # mc_samples x batch_shape x num_cells x q_choose_i x i x m
-            log_improvement_i = self._log_improvement(obj_subsets, view_shape)
+                # 2) take the minimum log improvement over all i subsets.
+                log_improvement_i = self._smooth_min(
+                    log_improvement_i,
+                    dim=-2,
+                )
 
-            # 2) take the minimum log improvement over all i subsets.
-            # since all hyperrectangles share one vertex, the opposite vertex of the
-            # overlap is given by the component-wise minimum.
-            # negative of maximum of negative log_improvement is approximation to min.
-            log_improvement_i = self._smooth_min(
-                log_improvement_i,
-                dim=-2,
-            )  # mc_samples x batch_shape x num_cells x q_choose_i x m
+                # 3) compute the log lengths of the cells' sides.
+                log_lengths_i = self._log_cell_lengths(log_improvement_i, view_shape)
 
-            # 3) compute the log lengths of the cells' sides.
-            # mc_samples x batch_shape x num_cells x q_choose_i x m
-            log_lengths_i = self._log_cell_lengths(log_improvement_i, view_shape)
-
-            # 4) take product over hyperrectangle side lengths to compute area (m-dim).
-            # after, log_areas_i is mc_samples x batch_shape x num_cells x q_choose_i
-            log_areas_i = log_lengths_i.sum(dim=-1)  # areas_i = lengths_i.prod(dim=-1)
+                # 4) take product over hyperrectangle side lengths.
+                log_areas_i = log_lengths_i.sum(dim=-1)
 
             # 5) if constraints are present, apply a differentiable approximation of
             # the indicator function.
@@ -251,8 +421,6 @@ class qLogExpectedHypervolumeImprovement(
 
             # 7) Using the inclusion-exclusion principle, set the sign to be positive
             # for subsets of odd sizes and negative for subsets of even size
-            # in non-log space: areas_per_segment += (-1) ** (i + 1) * areas_i,
-            # but here in log space, we need to keep track of sign:
             log_areas_per_segment[..., i % 2] = logplusexp(
                 log_areas_per_segment[..., i % 2],
                 log_areas_i,
@@ -267,7 +435,7 @@ class qLogExpectedHypervolumeImprovement(
         return logmeanexp(logsumexp(log_areas_per_segment, dim=-1), dim=0)
 
     def _log_improvement(
-        self, obj_subsets: Tensor, view_shape: Union[Tuple, torch.Size]
+        self, obj_subsets: Tensor, view_shape: tuple | torch.Size
     ) -> Tensor:
         # smooth out the clamp and take the log (previous step 3)
         # subtract cell lower bounds, clamp min at zero, but first
@@ -282,7 +450,7 @@ class qLogExpectedHypervolumeImprovement(
         return log_Zi  # mc_samples x batch_shape x num_cells x q_choose_i x i x m
 
     def _log_cell_lengths(
-        self, log_improvement_i: Tensor, view_shape: Union[Tuple, torch.Size]
+        self, log_improvement_i: Tensor, view_shape: tuple | torch.Size
     ) -> Tensor:
         cell_upper_bounds = self.cell_upper_bounds.clamp_max(
             1e10 if log_improvement_i.dtype == torch.double else 1e8
@@ -311,6 +479,7 @@ class qLogExpectedHypervolumeImprovement(
 
     @concatenate_pending_points
     @t_batch_mode_transform()
+    @average_over_ensemble_models
     def forward(self, X: Tensor) -> Tensor:
         posterior = self.model.posterior(X)
         samples = self.get_posterior_samples(posterior)
@@ -321,29 +490,28 @@ class qLogNoisyExpectedHypervolumeImprovement(
     NoisyExpectedHypervolumeMixin,
     qLogExpectedHypervolumeImprovement,
 ):
-
     _log: bool = True
 
     def __init__(
         self,
         model: Model,
-        ref_point: Union[List[float], Tensor],
+        ref_point: list[float] | Tensor,
         X_baseline: Tensor,
-        sampler: Optional[MCSampler] = None,
-        objective: Optional[MCMultiOutputObjective] = None,
-        constraints: Optional[List[Callable[[Tensor], Tensor]]] = None,
-        X_pending: Optional[Tensor] = None,
-        eta: Optional[Union[Tensor, float]] = 1e-3,
+        sampler: MCSampler | None = None,
+        objective: MCMultiOutputObjective | None = None,
+        constraints: list[Callable[[Tensor], Tensor]] | None = None,
+        X_pending: Tensor | None = None,
+        eta: Tensor | float = 1e-3,
         prune_baseline: bool = False,
         alpha: float = 0.0,
         cache_pending: bool = True,
         max_iep: int = 0,
         incremental_nehvi: bool = True,
-        cache_root: bool = True,
+        cache_root: bool | None = None,
         tau_relu: float = TAU_RELU,
         tau_max: float = 1e-3,  # TAU_MAX,
         fat: bool = True,
-        marginalize_dim: Optional[int] = None,
+        marginalize_dim: int | None = None,
     ) -> None:
         r"""
         q-Log Noisy Expected Hypervolume Improvement supporting m>=2 outcomes.
@@ -353,59 +521,61 @@ class qLogNoisyExpectedHypervolumeImprovement(
         Example:
             >>> model = SingleTaskGP(train_X, train_Y)
             >>> ref_point = [0.0, 0.0]
-            >>> qNEHVI = qNoisyExpectedHypervolumeImprovement(model, ref_point, train_X)
+            >>> qNEHVI = qLogNoisyExpectedHypervolumeImprovement(
+            ...     model, ref_point, train_X
+            ... )
             >>> qnehvi = qNEHVI(test_X)
 
         Args:
             model: A fitted model.
-            ref_point: A list or tensor with `m` elements representing the reference
+            ref_point: A list or tensor with ``m`` elements representing the reference
                 point (in the outcome space) w.r.t. to which compute the hypervolume.
                 This is a reference point for the objective values (i.e. after
-                applying `objective` to the samples).
-            X_baseline: A `r x d`-dim Tensor of `r` design points that have already
+                applying ``objective`` to the samples).
+            X_baseline: A ``r x d``-dim Tensor of ``r`` design points that have already
                 been observed. These points are considered as potential approximate
                 pareto-optimal design points.
             sampler: The sampler used to draw base samples. If not given,
-                a sampler is generated using `get_sampler`.
+                a sampler is generated using ``get_sampler``.
                 Note: a pareto front is created for each mc sample, which can be
-                computationally intensive for `m` > 2.
+                computationally intensive for ``m`` > 2.
             objective: The MCMultiOutputObjective under which the samples are
-                evaluated. Defaults to `IdentityMultiOutputObjective()`.
+                evaluated. Defaults to ``IdentityMultiOutputObjective()``.
             constraints: A list of callables, each mapping a Tensor of dimension
-                `sample_shape x batch-shape x q x m` to a Tensor of dimension
-                `sample_shape x batch-shape x q`, where negative values imply
+                ``sample_shape x batch-shape x q x m`` to a Tensor of dimension
+                ``sample_shape x batch-shape x q``, where negative values imply
                 feasibility. The acquisition function will compute expected feasible
                 hypervolume.
-            X_pending: A `batch_shape x m x d`-dim Tensor of `m` design points that
+            X_pending: A ``batch_shape x m x d``-dim Tensor of ``m`` design points that
                 have points that have been submitted for function evaluation, but
                 have not yet been evaluated.
             eta: The temperature parameter for the sigmoid function used for the
                 differentiable approximation of the constraints. In case of a float the
-                same `eta` is used for every constraint in constraints. In case of a
+                same ``eta`` is used for every constraint in constraints. In case of a
                 tensor the length of the tensor must match the number of provided
                 constraints. The i-th constraint is then estimated with the i-th
-                `eta` value.
-            prune_baseline: If True, remove points in `X_baseline` that are
+                ``eta`` value.
+            prune_baseline: If True, remove points in ``X_baseline`` that are
                 highly unlikely to be the pareto optimal and better than the
                 reference point. This can significantly improve computation time and
                 is generally recommended. In order to customize pruning parameters,
-                instead manually call `prune_inferior_points_multi_objective` on
-                `X_baseline` before instantiating the acquisition function.
+                instead manually call ``prune_inferior_points_multi_objective`` on
+                ``X_baseline`` before instantiating the acquisition function.
             alpha: The hyperparameter controlling the approximate non-dominated
                 partitioning. The default value of 0.0 means an exact partitioning
-                is used. As the number of objectives `m` increases, consider increasing
-                this parameter in order to limit computational complexity.
+                is used. As the number of objectives ``m`` increases, consider
+                increasing this parameter in order to limit computational complexity.
             cache_pending: A boolean indicating whether to use cached box
                 decompositions (CBD) for handling pending points. This is
                 generally recommended.
             max_iep: The maximum number of pending points before the box
                 decompositions will be recomputed.
             incremental_nehvi: A boolean indicating whether to compute the
-                incremental NEHVI from the `i`th point where `i=1, ..., q`
+                incremental NEHVI from the ``i``th point where ``i=1, ..., q``
                 under sequential greedy optimization, or the full qNEHVI over
-                `q` points.
+                ``q`` points.
             cache_root: A boolean indicating whether to cache the root
-                decomposition over `X_baseline` and use low-rank updates.
+                decomposition over ``X_baseline`` and use low-rank updates.
             marginalize_dim: A batch dimension that should be marginalized.
         """
         MultiObjectiveMCAcquisitionFunction.__init__(
@@ -438,32 +608,14 @@ class qLogNoisyExpectedHypervolumeImprovement(
         self.tau_relu = tau_relu
         self.tau_max = tau_max
         self.fat = fat
+        _try_load_fused_kernel()
 
-    @concatenate_pending_points
     @t_batch_mode_transform()
+    @average_over_ensemble_models
     def forward(self, X: Tensor) -> Tensor:
-        X_full = torch.cat([match_batch_shape(self.X_baseline, X), X], dim=-2)
-        # NOTE: To ensure that we correctly sample `f(X)` from the joint distribution
-        # `f((X_baseline, X)) ~ P(f | D)`, it is critical to compute the joint posterior
-        # over X *and* X_baseline -- which also contains pending points whenever there
-        # are any --  since the baseline and pending values `f(X_baseline)` are
-        # generally pre-computed and cached before the `forward` call, see the docs of
-        # `cache_pending` for details.
-        # TODO: Improve the efficiency by not re-computing the X_baseline-X_baseline
-        # covariance matrix, but only the covariance of
-        # 1) X and X, and
-        # 2) X and X_baseline.
-        posterior = self.model.posterior(X_full)
-        # Account for possible one-to-many transform and the model batch dimensions in
-        # ensemble models.
-        event_shape_lag = 1 if is_ensemble(self.model) else 2
-        n_w = (
-            posterior._extended_shape()[X_full.dim() - event_shape_lag]
-            // X_full.shape[-2]
-        )
-        q_in = X.shape[-2] * n_w
-        self._set_sampler(q_in=q_in, posterior=posterior)
-        samples = self._get_f_X_samples(posterior=posterior, q_in=q_in)
+        # Get samples from the posterior, and manually concatenate pending points that
+        # have not yet been cached. Shared with qNEHVI.
+        samples, X = self._compute_posterior_samples_and_concat_pending(X)
         # Add previous nehvi from pending points.
         nehvi = self._compute_log_qehvi(samples=samples, X=X)
         if self.incremental_nehvi:

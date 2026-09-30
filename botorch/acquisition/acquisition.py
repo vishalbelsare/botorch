@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import warnings
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import torch
 from botorch.exceptions import BotorchWarning
@@ -28,8 +27,6 @@ class AcquisitionFunction(Module, ABC):
     Please note that if your acquisition requires a backwards call,
     you will need to wrap the backwards call inside of an enable_grad
     context to be able to optimize the acquisition. See #1164.
-
-    :meta private:
     """
 
     _log: bool = False  # whether the acquisition utilities are in log-space
@@ -43,11 +40,11 @@ class AcquisitionFunction(Module, ABC):
         super().__init__()
         self.model: Model = model
 
-    def set_X_pending(self, X_pending: Optional[Tensor] = None) -> None:
+    def set_X_pending(self, X_pending: Tensor | None = None) -> None:
         r"""Informs the acquisition function about pending design points.
 
         Args:
-            X_pending: `n x d` Tensor with `n` `d`-dim design points that have
+            X_pending: ``n x d`` Tensor with ``n`` ``d``-dim design points that have
                 been submitted for evaluation but have not yet been evaluated.
         """
         if X_pending is not None:
@@ -56,6 +53,7 @@ class AcquisitionFunction(Module, ABC):
                     "Pending points require a gradient but the acquisition function"
                     " will not provide a gradient to these points.",
                     BotorchWarning,
+                    stacklevel=2,
                 )
             self.X_pending = X_pending.detach().clone()
         else:
@@ -66,12 +64,12 @@ class AcquisitionFunction(Module, ABC):
         r"""Evaluate the acquisition function on the candidate set X.
 
         Args:
-            X: A `(b) x q x d`-dim Tensor of `(b)` t-batches with `q` `d`-dim
+            X: A ``(b) x q x d``-dim Tensor of ``(b)`` t-batches with ``q`` ``d``-dim
                 design points each.
 
         Returns:
-            A `(b)`-dim Tensor of acquisition function values at the given
-            design points `X`.
+            A ``(b)``-dim Tensor of acquisition function values at the given
+            design points ``X``.
         """
         pass  # pragma: no cover
 
@@ -79,8 +77,6 @@ class AcquisitionFunction(Module, ABC):
 class OneShotAcquisitionFunction(AcquisitionFunction, ABC):
     r"""
     Abstract base class for acquisition functions using one-shot optimization
-
-    :meta private:
     """
 
     @abstractmethod
@@ -101,11 +97,11 @@ class OneShotAcquisitionFunction(AcquisitionFunction, ABC):
         r"""Extract the candidates from a full "one-shot" parameterization.
 
         Args:
-            X_full: A `b x q_aug x d`-dim Tensor with `b` t-batches of `q_aug`
+            X_full: A ``b x q_aug x d``-dim Tensor with ``b`` t-batches of ``q_aug``
                 design points each.
 
         Returns:
-            A `b x q x d`-dim Tensor with `b` t-batches of `q` design points each.
+            A ``b x q x d``-dim Tensor with ``b`` t-batches of ``q`` design points each.
         """
         pass  # pragma: no cover
 
@@ -114,20 +110,18 @@ class MCSamplerMixin(ABC):
     r"""A mix-in for adding sampler functionality into an acquisition function class.
 
     Attributes:
-        _default_sample_shape: The `sample_shape` for the default sampler.
-
-    :meta private:
+        _default_sample_shape: The ``sample_shape`` for the default sampler.
     """
 
     _default_sample_shape = torch.Size([512])
 
-    def __init__(self, sampler: Optional[MCSampler] = None) -> None:
+    def __init__(self, sampler: MCSampler | None = None) -> None:
         r"""Register the sampler on the acquisition function.
 
         Args:
             sampler: The sampler used to draw base samples for MC-based acquisition
-                functions. If `None`, a sampler is generated on the fly within
-                the `get_posterior_samples` method using `get_sampler`.
+                functions. If ``None``, a sampler is generated on the fly within
+                the ``get_posterior_samples`` method using ``get_sampler``.
         """
         self.sampler = sampler
 
@@ -169,8 +163,6 @@ class MultiModelAcquisitionFunction(AcquisitionFunction, ABC):
     This is currently only a placeholder to help with some development
     in Ax. We plan to add some acquisition functions utilizing multiple
     models in the future.
-
-    :meta private:
     """
 
     def __init__(self, model_dict: ModelDict) -> None:

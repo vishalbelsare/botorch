@@ -19,7 +19,7 @@ referred to as q-Acquisition Functions. For instance, BoTorch ships with support
 for q-EI, q-UCB, and a few others.
 
 As discussed in the
-[design philosophy](design_philosophy#batching-batching-batching),
+[design philosophy](/docs/design_philosophy#parallelism-through-batched-computations),
 BoTorch has adopted the convention of referring to batches in the
 batch-acquisition sense as "q-batches", and to batches in the torch
 batch-evaluation sense as "t-batches".
@@ -35,9 +35,9 @@ with samples from the posterior in a consistent fashion.
 
 #### Batch-Mode Decorator
 
-In order to simplify the user-facing API for evaluating acquisition functions,  
+In order to simplify the user-facing API for evaluating acquisition functions,
 BoTorch implements the
-[`@t_batch_mode_transform`](../api/utils.html#botorch.utils.transforms.t_batch_mode_transform)
+[`@t_batch_mode_transform`](https://botorch.readthedocs.io/en/latest/utils.html#botorch.utils.transforms.t_batch_mode_transform)
 decorator, which allows the use of non-batch mode inputs. If applied to an
 instance method with a single `Tensor` argument, an input tensor to that method
 without a t-batch dimension (i.e. tensors of shape $q \times d$) will automatically
@@ -66,7 +66,7 @@ distribution:
   of $b_1 \times \cdots \times b_k$, with $n$ data points of $d$-dimensions each in every batch)
   yields a posterior with `event_shape` being $b_1 \times \cdots \times b_k \times n \times 1$.
   In most cases, the t-batch-shape will be single-dimensional (i.e., $k=1$).
-- Evaluating a multi-output model with $o$ outputs at a $b_1 \times \cdots \times b_k   
+- Evaluating a multi-output model with $o$ outputs at a $b_1 \times \cdots \times b_k
   \times n \times d$ tensor yields a posterior with `event_shape` equal to
   $b_1 \times \cdots \times b_k \times n \times o$.
 - Recall from the previous section that internally, with the help of the
@@ -123,7 +123,7 @@ The shape of the test points must support broadcasting to the $\textit{batch_sha
   necessary over $\textit{batch_shape}$)
 
 #### Batched Multi-Output Models
-The [`BatchedMultiOutputGPyTorchModel`](../api/models.html#batchedmultioutputgpytorchmodel)
+The [`BatchedMultiOutputGPyTorchModel`](https://botorch.readthedocs.io/en/latest/models.html#botorch.models.gpytorch.BatchedMultiOutputGPyTorchModel)
 class implements a fast multi-output model (assuming conditional independence of
 the outputs given the input) by batching over the outputs.
 
@@ -151,11 +151,16 @@ starting points. To efficiently optimize an acquisition function for a $q$-batch
 of candidate points using $r$ random restarts, BoTorch uses batched
 evaluation on a $r \times q \times d$ set of candidate points to independently
 evaluate and optimize each random restart in parallel.
-In order to optimize the $r$ acquisition functions using gradient information,
-the acquisition values of the $r$ random restarts are summed before
-back-propagating.
+By default, optimization states are decoupled across the restarts to avoid
+slowdowns in convergence (see e.g., [^Irie2026]).
+
+[^Irie2026]:
+    K. Irie, S. Watanabe and M. Onishi. Batch Acquisition Function Evaluations
+    and Decouple Optimizer Updates for Faster Bayesian Optimization. Workshop on
+    AI to Accelerate Science and Engineering at AAAI, Singapore, 2026.
+    [paper](https://arxiv.org/abs/2511.13625)
 
 #### Batched Cross Validation
 See the
-[Using batch evaluation for fast cross validation](../tutorials/batch_mode_cross_validation)
+[Using batch evaluation for fast cross validation](tutorials/batch_mode_cross_validation)
 tutorial for details on using batching for fast cross validation.

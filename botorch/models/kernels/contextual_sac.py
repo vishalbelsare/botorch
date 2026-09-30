@@ -4,11 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import torch
+from botorch.models.utils.gpytorch_modules import get_covar_module_with_dim_scaled_prior
 from gpytorch.kernels.kernel import Kernel
-from gpytorch.kernels.matern_kernel import MaternKernel
 from gpytorch.kernels.scale_kernel import ScaleKernel
 from gpytorch.priors.torch_priors import GammaPrior
 from linear_operator.operators.sum_linear_operator import SumLinearOperator
@@ -19,13 +19,13 @@ from torch.nn import ModuleDict  # pyre-ignore
 class SACKernel(Kernel):
     r"""The structural additive contextual(SAC) kernel.
 
-    The kernel is used for contextual BO without oberseving context breakdowns.
+    The kernel is used for contextual BO without observing context breakdowns.
     There are d parameters and M contexts. In total, the dimension of parameter space
     is d*M and input x can be written as
     x=[x_11, ..., x_1d, x_21, ..., x_2d, ...,  x_M1, ..., x_Md].
 
     The kernel uses the parameter decomposition and assumes an additive structure
-    across contexts. Each context compponent is assumed to be independent.
+    across contexts. Each context component is assumed to be independent.
 
     .. math::
        \begin{equation*}
@@ -35,16 +35,16 @@ class SACKernel(Kernel):
 
     where
     * :math: M is the number of partitions of parameter space. Each partition contains
-    same number of parameters d. Each kernel `k_i` acts only on d parameters of ith
-    partition i.e. `\mathbf{x}_(i)`. Each kernel `k_i` is a scaled Matern kernel
+    same number of parameters d. Each kernel ``k_i`` acts only on d parameters of ith
+    partition i.e. ``\mathbf{x}_(i)``. Each kernel ``k_i`` is a scaled RBF kernel
     with same lengthscales but different outputscales.
     """
 
     def __init__(
         self,
-        decomposition: Dict[str, List[int]],
+        decomposition: dict[str, list[int]],
         batch_shape: torch.Size,
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
     ) -> None:
         r"""
         Args:
@@ -72,11 +72,9 @@ class SACKernel(Kernel):
             for context, active_params in self.decomposition.items()
         }
 
-        self.base_kernel = MaternKernel(
-            nu=2.5,
+        self.base_kernel = get_covar_module_with_dim_scaled_prior(
             ard_num_dims=num_param,
             batch_shape=batch_shape,
-            lengthscale_prior=GammaPrior(3.0, 6.0),
         )
 
         self.kernel_dict = {}  # scaled kernel for each parameter space partition
@@ -87,7 +85,7 @@ class SACKernel(Kernel):
         self.kernel_dict = ModuleDict(self.kernel_dict)
 
     @property
-    def device(self) -> Optional[torch.device]:
+    def device(self) -> torch.device | None:
         return self._device
 
     def forward(

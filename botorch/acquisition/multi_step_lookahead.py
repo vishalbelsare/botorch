@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import torch
@@ -34,6 +35,7 @@ from botorch.optim.initializers import initialize_q_batch
 from botorch.sampling.base import MCSampler
 from botorch.sampling.normal import SobolQMCNormalSampler
 from botorch.utils.transforms import (
+    average_over_ensemble_models,
     match_batch_shape,
     t_batch_mode_transform,
     unnormalize,
@@ -43,7 +45,7 @@ from torch.distributions import Beta
 from torch.nn import ModuleList
 
 
-TAcqfArgConstructor = Callable[[Model, Tensor], Dict[str, Any]]
+TAcqfArgConstructor = Callable[[Model, Tensor], dict[str, Any]]
 
 
 class qMultiStepLookahead(MCAcquisitionFunction, OneShotAcquisitionFunction):
@@ -52,65 +54,69 @@ class qMultiStepLookahead(MCAcquisitionFunction, OneShotAcquisitionFunction):
     def __init__(
         self,
         model: Model,
-        batch_sizes: List[int],
-        num_fantasies: Optional[List[int]] = None,
-        samplers: Optional[List[MCSampler]] = None,
-        valfunc_cls: Optional[List[Optional[Type[AcquisitionFunction]]]] = None,
-        valfunc_argfacs: Optional[List[Optional[TAcqfArgConstructor]]] = None,
-        objective: Optional[MCAcquisitionObjective] = None,
-        posterior_transform: Optional[PosteriorTransform] = None,
-        inner_mc_samples: Optional[List[int]] = None,
-        X_pending: Optional[Tensor] = None,
+        batch_sizes: list[int],
+        num_fantasies: list[int] | None = None,
+        samplers: list[MCSampler] | None = None,
+        valfunc_cls: list[type[AcquisitionFunction] | None] | None = None,
+        valfunc_argfacs: list[TAcqfArgConstructor | None] | None = None,
+        objective: MCAcquisitionObjective | None = None,
+        posterior_transform: PosteriorTransform | None = None,
+        inner_mc_samples: list[int] | None = None,
+        X_pending: Tensor | None = None,
         collapse_fantasy_base_samples: bool = True,
     ) -> None:
         r"""q-Multi-Step Look-Ahead (one-shot optimization).
 
-        Performs a `k`-step lookahead by means of repeated fantasizing.
+        Performs a ``k``-step lookahead by means of repeated fantasizing.
 
         Allows to specify the stage value functions by passing the respective class
-        objects via the `valfunc_cls` list. Optionally, `valfunc_argfacs` takes a list
-        of callables that generate additional kwargs for these constructors. By default,
-        `valfunc_cls` will be chosen as `[None, ..., None, PosteriorMean]`, which
-        corresponds to the (parallel) multi-step KnowledgeGradient. If, in addition,
-        `k=1` and `q_1 = 1`, this reduces to the classic Knowledge Gradient.
+        objects via the ``valfunc_cls`` list. Optionally,
+        ``valfunc_argfacs`` takes a list of callables that generate
+        additional kwargs for these constructors. By default,
+        ``valfunc_cls`` will be chosen as ``[None, ..., None, PosteriorMean]``,
+        which corresponds to the (parallel) multi-step KnowledgeGradient.
+        If, in addition,
+        ``k=1`` and ``q_1 = 1``, this reduces to the classic Knowledge Gradient.
 
         WARNING: The complexity of evaluating this function is exponential in the number
         of lookahead steps!
 
         Args:
             model: A fitted model.
-            batch_sizes: A list `[q_1, ..., q_k]` containing the batch sizes for the
-                `k` look-ahead steps.
-            num_fantasies: A list `[f_1, ..., f_k]` containing the number of fantasy
-                points to use for the `k` look-ahead steps.
+            batch_sizes: A list ``[q_1, ..., q_k]`` containing the batch sizes for the
+                ``k`` look-ahead steps.
+            num_fantasies: A list ``[f_1, ..., f_k]`` containing the number of fantasy
+                points to use for the ``k`` look-ahead steps.
             samplers: A list of MCSampler objects to be used for sampling fantasies in
                 each stage.
-            valfunc_cls: A list of `k + 1` acquisition function classes to be used as
-                the (stage + terminal) value functions. Each element (except for the
-                last one) can be `None`, in which case a zero stage value is assumed for
-                the respective stage. If `None`, this defaults to
-                `[None, ..., None, PosteriorMean]`
-            valfunc_argfacs: A list of `k + 1` "argument factories", i.e. callables that
-                map a `Model` and input tensor `X` to a dictionary of kwargs for the
-                respective stage value function constructor (e.g. `best_f` for
-                `ExpectedImprovement`). If None, only the standard (`model`, `sampler`
-                and `objective`) kwargs will be used.
-            objective: The objective under which the output is evaluated. If `None`, use
-                the model output (requires a single-output model or a posterior
-                transform). Otherwise the objective is MC-evaluated
-                (using `inner_sampler`).
-            posterior_transform: An optional PosteriorTransform. If given, this
-                transforms the posterior before evaluation. If `objective is None`,
-                then the output of the transformed posterior is used. If `objective` is
-                given, the `inner_sampler` is used to draw samples from the transformed
-                posterior, which are then evaluated under the `objective`.
-            inner_mc_samples: A list `[n_0, ..., n_k]` containing the number of MC
-                samples to be used for evaluating the stage value function. Ignored if
-                the objective is `None`.
-            X_pending: A `m x d`-dim Tensor of `m` design points that have points that
-                have been submitted for function evaluation but have not yet been
-                evaluated. Concatenated into `X` upon forward call. Copied and set to
-                have no gradient.
+            valfunc_cls: A list of ``k + 1`` acquisition function classes
+                to be used as the (stage + terminal) value functions. Each
+                element (except for the last one) can be ``None``, in which case
+                a zero stage value is assumed for the respective stage. If
+                ``None``, this defaults to ``[None, ..., None, PosteriorMean]``
+            valfunc_argfacs: A list of ``k + 1`` "argument factories",
+                i.e. callables that map a ``Model`` and input tensor ``X`` to a
+                dictionary of kwargs for the respective stage value function
+                constructor (e.g. ``best_f`` for ``ExpectedImprovement``). If
+                None, only the standard (``model``, ``sampler`` and ``objective``)
+                kwargs will be used.
+            objective: The objective under which the output is evaluated.
+                If ``None``, use the model output (requires a single-output
+                model or a posterior transform). Otherwise the objective is
+                MC-evaluated (using ``inner_sampler``).
+            posterior_transform: An optional PosteriorTransform. If given,
+                this transforms the posterior before evaluation. If ``objective
+                is None``, then the output of the transformed posterior is used.
+                If ``objective`` is given, the ``inner_sampler`` is used to draw
+                samples from the transformed posterior, which are then evaluated
+                under the ``objective``.
+            inner_mc_samples: A list ``[n_0, ..., n_k]`` containing the
+                number of MC samples to be used for evaluating the stage value
+                function. Ignored if the objective is ``None``.
+            X_pending: A ``m x d``-dim Tensor of ``m`` design points that have
+                points that have been submitted for function evaluation but have
+                not yet been evaluated. Concatenated into ``X`` upon forward
+                call. Copied and set to have no gradient.
             collapse_fantasy_base_samples: If True, collapse_batch_dims of the Samplers
                 will be applied on fantasy batch dimensions as well, meaning that base
                 samples are the same in all subtrees starting from the same level.
@@ -129,9 +135,9 @@ class qMultiStepLookahead(MCAcquisitionFunction, OneShotAcquisitionFunction):
                 "`samplers` as arguments."
             )
         if samplers is None:
-            # If collapse_fantasy_base_samples is False, the `batch_range_override`
+            # If collapse_fantasy_base_samples is False, the ``batch_range_override``
             # is set on the samplers during the forward call.
-            samplers: List[MCSampler] = [
+            samplers: list[MCSampler] = [
                 SobolQMCNormalSampler(sample_shape=torch.Size([nf]))
                 for nf in num_fantasies
             ]
@@ -164,17 +170,18 @@ class qMultiStepLookahead(MCAcquisitionFunction, OneShotAcquisitionFunction):
         self._collapse_fantasy_base_samples = collapse_fantasy_base_samples
 
     @t_batch_mode_transform()
+    @average_over_ensemble_models
     def forward(self, X: Tensor) -> Tensor:
         r"""Evaluate qMultiStepLookahead on the candidate set X.
 
         Args:
-            X: A `batch_shape x q' x d`-dim Tensor with `q'` design points for each
-                batch, where `q' = q_0 + f_1 q_1 + f_2 f_1 q_2 + ...`. Here `q_i`
+            X: A ``batch_shape x q' x d``-dim Tensor with ``q'`` design points for each
+                batch, where ``q' = q_0 + f_1 q_1 + f_2 f_1 q_2 + ...``. Here ``q_i``
                 is the number of candidates jointly considered in look-ahead step
-                `i`, and `f_i` is respective number of fantasies.
+                ``i``, and ``f_i`` is respective number of fantasies.
 
         Returns:
-            The acquisition value for each batch as a tensor of shape `batch_shape`.
+            The acquisition value for each batch as a tensor of shape ``batch_shape``.
         """
         Xs = self.get_multi_step_tree_input_representation(X)
 
@@ -199,7 +206,7 @@ class qMultiStepLookahead(MCAcquisitionFunction, OneShotAcquisitionFunction):
         r"""Number of auxiliary variables in the q-batch dimension.
 
         Returns:
-             `q_aux` s.t. `q + q_aux = augmented_q_batch_size`
+             ``q_aux`` s.t. ``q + q_aux = augmented_q_batch_size``
         """
         return np.dot(self.batch_sizes, np.cumprod(self.num_fantasies)).item()
 
@@ -207,7 +214,7 @@ class qMultiStepLookahead(MCAcquisitionFunction, OneShotAcquisitionFunction):
         r"""Set batch_range on samplers.
 
         Args:
-            batch_shape: The batch shape of the input tensor `X`.
+            batch_shape: The batch shape of the input tensor ``X``.
         """
         tbatch_dim_start = -2 - len(batch_shape)
         for s in self.samplers:
@@ -221,20 +228,20 @@ class qMultiStepLookahead(MCAcquisitionFunction, OneShotAcquisitionFunction):
 
         Returns:
             The augmented size for one-shot optimization (including variables
-            parameterizing the fantasy solutions): `q_0 + f_1 q_1 + f_2 f_1 q_2 + ...`
+            parameterizing the fantasy solutions): ``q_0 + f_1 q_1 + f_2 f_1 q_2 + ...``
         """
         return q + self._num_auxiliary
 
-    def get_split_shapes(self, X: Tensor) -> Tuple[Size, List[Size], List[int]]:
+    def get_split_shapes(self, X: Tensor) -> tuple[Size, list[Size], list[int]]:
         r"""Get the split shapes from X.
 
         Args:
-            X: A `batch_shape x q_aug x d`-dim tensor including fantasy points.
+            X: A ``batch_shape x q_aug x d``-dim tensor including fantasy points.
 
         Returns:
-            A 3-tuple `(batch_shape, shapes, sizes)`, where
-            `shape[i] = f_i x .... x f_1 x batch_shape x q_i x d` and
-            `size[i] = f_i * ... f_1 * q_i`.
+            A 3-tuple ``(batch_shape, shapes, sizes)``, where
+            ``shape[i] = f_i x .... x f_1 x batch_shape x q_i x d`` and
+            ``size[i] = f_i * ... f_1 * q_i``.
         """
         batch_shape, (q_aug, d) = X.shape[:-2], X.shape[-2:]
         q = q_aug - self._num_auxiliary
@@ -249,18 +256,18 @@ class qMultiStepLookahead(MCAcquisitionFunction, OneShotAcquisitionFunction):
         sizes = [s[: (-2 - len(batch_shape))].numel() * s[-2] for s in shapes]
         return batch_shape, shapes, sizes
 
-    def get_multi_step_tree_input_representation(self, X: Tensor) -> List[Tensor]:
+    def get_multi_step_tree_input_representation(self, X: Tensor) -> list[Tensor]:
         r"""Get the multi-step tree representation of X.
 
         Args:
-            X: A `batch_shape x q' x d`-dim Tensor with `q'` design points for each
-                batch, where `q' = q_0 + f_1 q_1 + f_2 f_1 q_2 + ...`. Here `q_i`
+            X: A ``batch_shape x q' x d``-dim Tensor with ``q'`` design points for each
+                batch, where ``q' = q_0 + f_1 q_1 + f_2 f_1 q_2 + ...``. Here ``q_i``
                 is the number of candidates jointly considered in look-ahead step
-                `i`, and `f_i` is respective number of fantasies.
+                ``i``, and ``f_i`` is respective number of fantasies.
 
         Returns:
-            A list `[X_j, ..., X_k]` of tensors, where `X_i` has shape
-            `f_i x .... x f_1 x batch_shape x q_i x d`.
+            A list ``[X_j, ..., X_k]`` of tensors, where ``X_i`` has shape
+            ``f_i x .... x f_1 x batch_shape x q_i x d``.
 
         """
         batch_shape, shapes, sizes = self.get_split_shapes(X=X)
@@ -283,11 +290,12 @@ class qMultiStepLookahead(MCAcquisitionFunction, OneShotAcquisitionFunction):
         r"""We only return X as the set of candidates post-optimization.
 
         Args:
-            X_full: A `batch_shape x q' x d`-dim Tensor with `q'` design points for
-                each batch, where `q' = q + f_1 q_1 + f_2 f_1 q_2 + ...`.
+            X_full: A ``batch_shape x q' x d``-dim Tensor with ``q'`` design points for
+                each batch, where ``q' = q + f_1 q_1 + f_2 f_1 q_2 + ...``.
 
         Returns:
-            A `batch_shape x q x d`-dim Tensor with `q` design points for each batch.
+            A ``batch_shape x q x d``-dim Tensor with ``q`` design points for
+            each batch.
         """
         return X_full[..., : -self._num_auxiliary, :]
 
@@ -295,10 +303,10 @@ class qMultiStepLookahead(MCAcquisitionFunction, OneShotAcquisitionFunction):
         r"""Fantasy model induced by X.
 
         Args:
-            X: A `batch_shape x q' x d`-dim Tensor with `q'` design points for each
-                batch, where `q' = q_0 + f_1 q_1 + f_2 f_1 q_2 + ...`. Here `q_i`
+            X: A ``batch_shape x q' x d``-dim Tensor with ``q'`` design points for each
+                batch, where ``q' = q_0 + f_1 q_1 + f_2 f_1 q_2 + ...``. Here ``q_i``
                 is the number of candidates jointly considered in look-ahead step
-                `i`, and `f_i` is respective number of fantasies.
+                ``i``, and ``f_i`` is respective number of fantasies.
 
         Returns:
             The fantasy model induced by X.
@@ -316,15 +324,15 @@ class qMultiStepLookahead(MCAcquisitionFunction, OneShotAcquisitionFunction):
 
 def _step(
     model: Model,
-    Xs: List[Tensor],
-    samplers: List[Optional[MCSampler]],
-    valfunc_cls: List[Optional[Type[AcquisitionFunction]]],
-    valfunc_argfacs: List[Optional[TAcqfArgConstructor]],
-    inner_samplers: List[Optional[MCSampler]],
+    Xs: list[Tensor],
+    samplers: list[MCSampler | None],
+    valfunc_cls: list[type[AcquisitionFunction] | None],
+    valfunc_argfacs: list[TAcqfArgConstructor | None],
+    inner_samplers: list[MCSampler | None],
     objective: MCAcquisitionObjective,
-    posterior_transform: Optional[PosteriorTransform],
-    running_val: Optional[Tensor] = None,
-    sample_weights: Optional[Tensor] = None,
+    posterior_transform: PosteriorTransform | None,
+    running_val: Tensor | None = None,
+    sample_weights: Tensor | None = None,
     step_index: int = 0,
 ) -> Tensor:
     r"""Recursive multi-step look-ahead computation.
@@ -332,37 +340,37 @@ def _step(
     Helper function computing the "value-to-go" of a multi-step lookahead scheme.
 
     Args:
-        model: A Model of appropriate batch size. Specifically, it must be possible to
-            evaluate the model's posterior at `Xs[0]`.
-        Xs: A list `[X_j, ..., X_k]` of tensors, where `X_i` has shape
-            `f_i x .... x f_1 x batch_shape x q_i x d`.
-        samplers: A list of `k - j` samplers, such that the number of samples of sampler
-            `i` is `f_i`. The last element of this list is considered the
-            "inner sampler", which is used for evaluating the objective in case it is an
-            MCAcquisitionObjective.
-        valfunc_cls: A list of acquisition function class to be used as the (stage +
-            terminal) value functions. Each element (except for the last one) can be
-            `None`, in which case a zero stage value is assumed for the respective
-            stage.
-        valfunc_argfacs: A list of callables that map a `Model` and input tensor `X` to
-            a dictionary of kwargs for the respective stage value function constructor.
-            If `None`, only the standard `model`, `sampler` and `objective` kwargs will
-            be used.
-        inner_samplers: A list of `MCSampler` objects, each to be used in the stage
+        model: A Model of appropriate batch size. Specifically, it must be
+            possible to evaluate the model's posterior at ``Xs[0]``.
+        Xs: A list ``[X_j, ..., X_k]`` of tensors, where ``X_i`` has shape
+            ``f_i x .... x f_1 x batch_shape x q_i x d``.
+        samplers: A list of ``k - j`` samplers, such that the number of
+            samples of sampler ``i`` is ``f_i``. The last element of this list
+            is considered the "inner sampler", which is used for evaluating
+            the objective in case it is an MCAcquisitionObjective.
+        valfunc_cls: A list of acquisition function class to be used as the
+            (stage + terminal) value functions. Each element (except for the
+            last one) can be ``None``, in which case a zero stage value is
+            assumed for the respective stage.
+        valfunc_argfacs: A list of callables that map a ``Model`` and input
+            tensor ``X`` to a dictionary of kwargs for the respective stage
+            value function constructor. If ``None``, only the standard
+            ``model``, ``sampler`` and ``objective`` kwargs will be used.
+        inner_samplers: A list of ``MCSampler`` objects, each to be used in the stage
             value function at the corresponding index.
         objective: The MCAcquisitionObjective under which the model output is evaluated.
         posterior_transform: A PosteriorTransform. Used to transform the posterior
             before sampling / evaluating the model output.
-        running_val: As `batch_shape`-dim tensor containing the current running value.
-        sample_weights: A tensor of shape `f_i x .... x f_1 x batch_shape` when called
-            in the `i`-th step by which to weight the stage value samples. Used in
+        running_val: As ``batch_shape``-dim tensor containing the current running value.
+        sample_weights: A tensor of shape ``f_i x .... x f_1 x batch_shape`` when called
+            in the ``i``-th step by which to weight the stage value samples. Used in
             conjunction with Gauss-Hermite integration or importance sampling. Assumed
-            to be `None` in the initial step (when `step_index=0`).
-        step_index: The index of the look-ahead step. `step_index=0` indicates the
+            to be ``None`` in the initial step (when ``step_index=0``).
+        step_index: The index of the look-ahead step. ``step_index=0`` indicates the
             initial step.
 
     Returns:
-        A `b`-dim tensor containing the multi-step value of the design `X`.
+        A ``b``-dim tensor containing the multi-step value of the design ``X``.
     """
     X = Xs[0]
     if sample_weights is None:  # only happens in the initial step
@@ -424,38 +432,41 @@ def _step(
 
 def _compute_stage_value(
     model: Model,
-    valfunc_cls: Optional[Type[AcquisitionFunction]],
+    valfunc_cls: type[AcquisitionFunction] | None,
     X: Tensor,
     objective: MCAcquisitionObjective,
-    posterior_transform: Optional[PosteriorTransform],
-    inner_sampler: Optional[MCSampler] = None,
-    arg_fac: Optional[TAcqfArgConstructor] = None,
-) -> Optional[Tensor]:
+    posterior_transform: PosteriorTransform | None,
+    inner_sampler: MCSampler | None = None,
+    arg_fac: TAcqfArgConstructor | None = None,
+) -> Tensor | None:
     r"""Compute the stage value of a multi-step look-ahead policy.
 
     Args:
-        model: A Model of appropriate batch size. Specifically, it must be possible to
-            evaluate the model's posterior at `Xs[0]`.
-        valfunc_cls: The acquisition function class to be used as the stage value
-            functions. If `None`, a zero stage value is assumed (returns `None`)
-        X: A tensor with shape `f_i x .... x f_1 x batch_shape x q_i x d` when called in
-            the `i`-th step.
-        objective: The MCAcquisitionObjective under which the model output is evaluated.
+        model: A Model of appropriate batch size. Specifically, it must be
+            possible to evaluate the model's posterior at ``Xs[0]``.
+        valfunc_cls: The acquisition function class to be used as the stage
+            value functions. If ``None``, a zero stage value is assumed
+            (returns ``None``)
+        X: A tensor with shape ``f_i x .... x f_1 x batch_shape x q_i x d``
+            when called in the ``i``-th step.
+        objective: The MCAcquisitionObjective under which the model output
+            is evaluated.
         posterior_transform: A PosteriorTransform.
-        inner_sampler: An `MCSampler` object to be used in the stage value function. Can
-            be `None` for analytic acquisition functions or when using the default
-            sampler of the acquisition function class.
-        arg_fac: A callable mapping a `Model` and the input tensor `X` to a dictionary
-            of kwargs for the stage value function constructor. If `None`, only the
-            standard `model`, `sampler` and `objective` kwargs will be used.
+        inner_sampler: An ``MCSampler`` object to be used in the stage value
+            function. Can be ``None`` for analytic acquisition functions or
+            when using the default sampler of the acquisition function class.
+        arg_fac: A callable mapping a ``Model`` and the input tensor ``X``
+            to a dictionary of kwargs for the stage value function
+            constructor. If ``None``, only the standard ``model``, ``sampler``
+            and ``objective`` kwargs will be used.
 
     Returns:
-        A `f_i x ... x f_1 x batch_shape`-dim tensor of stage values, or `None`
+        A ``f_i x ... x f_1 x batch_shape``-dim tensor of stage values, or ``None``
         (= zero stage value).
     """
     if valfunc_cls is None:
         return None
-    common_kwargs: Dict[str, Any] = {
+    common_kwargs: dict[str, Any] = {
         "model": model,
         "posterior_transform": posterior_transform,
     }
@@ -471,18 +482,18 @@ def _compute_stage_value(
 
 def _construct_sample_weights(
     prev_weights: Tensor, sampler: MCSampler
-) -> Optional[Tensor]:
+) -> Tensor | None:
     r"""Iteratively construct tensor of sample weights for multi-step look-ahead.
 
     Args:
-        prev_weights: A `f_i x .... x f_1 x batch_shape` tensor of previous sample
+        prev_weights: A ``f_i x .... x f_1 x batch_shape`` tensor of previous sample
             weights.
-        sampler: A `MCSampler` that may have sample weights as the `base_weights`
-            attribute. If the sampler does not have a `base_weights` attribute,
+        sampler: A ``MCSampler`` that may have sample weights as the ``base_weights``
+            attribute. If the sampler does not have a ``base_weights`` attribute,
             samples are weighted uniformly.
 
     Returns:
-        A `f_{i+1} x .... x f_1 x batch_shape` tensor of sample weights for the next
+        A ``f_{i+1} x .... x f_1 x batch_shape`` tensor of sample weights for the next
         step.
     """
     new_weights = getattr(sampler, "base_weights", None)  # TODO: generalize this
@@ -500,31 +511,31 @@ def _construct_sample_weights(
 
 
 def _construct_inner_samplers(
-    batch_sizes: List[int],
-    valfunc_cls: List[Optional[Type[AcquisitionFunction]]],
-    inner_mc_samples: List[Optional[int]],
-    objective: Optional[MCAcquisitionObjective] = None,
-) -> List[Optional[MCSampler]]:
+    batch_sizes: list[int],
+    valfunc_cls: list[type[AcquisitionFunction] | None],
+    inner_mc_samples: list[int | None],
+    objective: MCAcquisitionObjective | None = None,
+) -> list[MCSampler | None]:
     r"""Check validity of inputs and construct inner samplers.
 
     Helper function to be used internally for constructing inner samplers.
 
     Args:
-        batch_sizes: A list `[q_1, ..., q_k]` containing the batch sizes for the
-            `k` look-ahead steps.
-        valfunc_cls: A list of `k + 1` acquisition function classes to be used as the
+        batch_sizes: A list ``[q_1, ..., q_k]`` containing the batch sizes for the
+            ``k`` look-ahead steps.
+        valfunc_cls: A list of ``k + 1`` acquisition function classes to be used as the
             (stage + terminal) value functions. Each element (except for the last one)
-            can be `None`, in which case a zero stage value is assumed for the
+            can be ``None``, in which case a zero stage value is assumed for the
             respective stage.
-        inner_mc_samples: A list `[n_0, ..., n_k]` containing the number of MC
+        inner_mc_samples: A list ``[n_0, ..., n_k]`` containing the number of MC
             samples to be used for evaluating the stage value function. Ignored if
-            the objective is `None`.
-        objective: The objective under which the output is evaluated. If `None`, use
+            the objective is ``None``.
+        objective: The objective under which the output is evaluated. If ``None``, use
             the model output (requires a single-output model or a posterior transform).
-            Otherwise the objective is MC-evaluated (using `inner_sampler`).
+            Otherwise the objective is MC-evaluated (using ``inner_sampler``).
 
     Returns:
-        A list with `k + 1` elements that are either `MCSampler`s or `None.
+        A list with ``k + 1`` elements that are either ``MCSampler``s or `None.
     """
     inner_samplers = []
     for q, vfc, mcs in zip([None] + batch_sizes, valfunc_cls, inner_mc_samples):
@@ -551,6 +562,7 @@ def _construct_inner_samplers(
                 warnings.warn(
                     "inner_mc_samples is ignored for analytic acquisition functions",
                     BotorchWarning,
+                    stacklevel=3,
                 )
             inner_samplers.append(None)
         else:
@@ -562,22 +574,22 @@ def _construct_inner_samplers(
 
 
 def _get_induced_fantasy_model(
-    model: Model, Xs: List[Tensor], samplers: List[Optional[MCSampler]]
+    model: Model, Xs: list[Tensor], samplers: list[MCSampler | None]
 ) -> Model:
     r"""Recursive computation of the fantasy model induced by an input tree.
 
     Args:
-        model: A Model of appropriate batch size. Specifically, it must be possible to
-            evaluate the model's posterior at `Xs[0]`.
-        Xs: A list `[X_j, ..., X_k]` of tensors, where `X_i` has shape
-            `f_i x .... x f_1 x batch_shape x q_i x d`.
-        samplers: A list of `k - j` samplers, such that the number of samples of sampler
-            `i` is `f_i`. The last element of this list is considered the
-            "inner sampler", which is used for evaluating the objective in case it is an
-            MCAcquisitionObjective.
+        model: A Model of appropriate batch size. Specifically, it must be
+            possible to evaluate the model's posterior at ``Xs[0]``.
+        Xs: A list ``[X_j, ..., X_k]`` of tensors, where ``X_i`` has shape
+            ``f_i x .... x f_1 x batch_shape x q_i x d``.
+        samplers: A list of ``k - j`` samplers, such that the number of
+            samples of sampler ``i`` is ``f_i``. The last element of this list
+            is considered the "inner sampler", which is used for evaluating
+            the objective in case it is an MCAcquisitionObjective.
 
     Returns:
-        A Model obtained by iteratively fantasizing over the input tree `Xs`.
+        A Model obtained by iteratively fantasizing over the input tree ``Xs``.
     """
     if len(Xs) == 1:
         return model
@@ -601,21 +613,23 @@ def warmstart_multistep(
 ) -> Tensor:
     r"""Warm-start initialization for multi-step look-ahead acquisition functions.
 
-    For now uses the same q' as in `full_optimizer`. TODO: allow different `q`.
+    For now uses the same q' as in ``full_optimizer``. TODO: allow different ``q``.
 
     Args:
         acq_function: A qMultiStepLookahead acquisition function.
-        bounds: A `2 x d` tensor of lower and upper bounds for each column of features.
-        num_restarts: The number of starting points for multistart acquisition
-            function optimization.
-        raw_samples: The number of raw samples to consider in the initialization
-            heuristic.
-        full_optimizer: The full tree of optimizers of the previous iteration of shape
-            `batch_shape x q' x d`. Typically obtained by passing
-            `return_best_only=False` and `return_full_tree=True` into `optimize_acqf`.
+        bounds: A ``2 x d`` tensor of lower and upper bounds for each column
+            of features.
+        num_restarts: The number of starting points for multistart
+            acquisition function optimization.
+        raw_samples: The number of raw samples to consider in the
+            initialization heuristic.
+        full_optimizer: The full tree of optimizers of the previous iteration
+            of shape ``batch_shape x q' x d``. Typically obtained by passing
+            ``return_best_only=False`` and ``return_full_tree=True`` into
+            ``optimize_acqf``.
 
     Returns:
-        A `num_restarts x q' x d` tensor for initial points for optimization.
+        A ``num_restarts x q' x d`` tensor for initial points for optimization.
 
     This is a very simple initialization heuristic.
     TODO: Use the observed values to identify the fantasy sub-tree that is closest to
@@ -631,7 +645,7 @@ def warmstart_multistep(
         perturbations = unnormalize(B.sample(X.shape).squeeze(-1), bounds)
         return (1 - eta) * X + eta * perturbations
 
-    def make_init_tree(Xopts: List[Tensor], bounds: Tensor, etas: Tensor) -> Tensor:
+    def make_init_tree(Xopts: list[Tensor], bounds: Tensor, etas: Tensor) -> Tensor:
         Xtrs = [mixin_layer(X=X, bounds=bounds, eta=eta) for eta, X in zip(etas, Xopts)]
         return torch.cat(Xtrs, dim=-2)
 
@@ -655,11 +669,11 @@ def warmstart_multistep(
     )
 
     with torch.no_grad():
-        Y_full = acq_function(X_full)
-    X_init = initialize_q_batch(X=X_full, Y=Y_full, n=num_restarts, eta=1.0)
+        acq_vals = acq_function(X_full)
+    X_init, _ = initialize_q_batch(X=X_full, acq_vals=acq_vals, n=num_restarts, eta=1.0)
     return X_init[:raw_samples]
 
 
-def make_best_f(model: Model, X: Tensor) -> Dict[str, Any]:
+def make_best_f(model: Model, X: Tensor) -> dict[str, Any]:
     r"""Extract the best observed training input from the model."""
     return {"best_f": model.train_targets.max(dim=-1).values}

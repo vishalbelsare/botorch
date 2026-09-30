@@ -10,8 +10,9 @@ Utilities for optimization.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Generator, Iterable, NamedTuple, Optional, Union
+from typing import Any, NamedTuple
 
 from torch import device as Device, dtype as Dtype, Tensor
 from torch.nn import Module
@@ -19,8 +20,8 @@ from torch.nn import Module
 
 class TensorCheckpoint(NamedTuple):
     values: Tensor
-    device: Optional[Device] = None
-    dtype: Optional[Dtype] = None
+    device: Device | None = None
+    dtype: Dtype | None = None
 
 
 @contextmanager
@@ -46,10 +47,10 @@ def delattr_ctx(
 
 @contextmanager
 def parameter_rollback_ctx(
-    parameters: Dict[str, Tensor],
-    checkpoint: Optional[Dict[str, TensorCheckpoint]] = None,
+    parameters: dict[str, Tensor],
+    checkpoint: dict[str, TensorCheckpoint] | None = None,
     **tkwargs: Any,
-) -> Generator[Dict[str, TensorCheckpoint], None, None]:
+) -> Generator[dict[str, TensorCheckpoint], None, None]:
     r"""Contextmanager that exits by rolling back a module's state_dict.
 
     Args:
@@ -57,16 +58,16 @@ def parameter_rollback_ctx(
         name_filter: Optional Boolean function used to filter items by name.
         checkpoint: Optional cache of values and tensor metadata specifying the rollback
             state for the module (or some subset thereof).
-        **tkwargs: Keyword arguments passed to `torch.Tensor.to` when copying data from
-            each tensor in `module.state_dict()` to the internally created checkpoint.
-            Only adhered to when the `checkpoint` argument is None.
+        **tkwargs: Keyword arguments passed to ``torch.Tensor.to`` when copying data
+            from each tensor in ``module.state_dict()`` to the internally created
+            checkpoint. Only adhered to when the ``checkpoint`` argument is None.
 
     Yields:
         A dictionary of TensorCheckpoints for the module's state_dict. Any in-places
         changes to the checkpoint will be observed at rollback time. If the checkpoint
         is cleared, no rollback will occur.
     """
-    # Create copies of the orginal values
+    # Create copies of the original values
     if checkpoint is None:
         checkpoint = {
             name: TensorCheckpoint(
@@ -90,10 +91,10 @@ def parameter_rollback_ctx(
 @contextmanager
 def module_rollback_ctx(
     module: Module,
-    name_filter: Optional[Callable[[str], bool]] = None,
-    checkpoint: Optional[Dict[str, TensorCheckpoint]] = None,
+    name_filter: Callable[[str], bool] | None = None,
+    checkpoint: dict[str, TensorCheckpoint] | None = None,
     **tkwargs: Any,
-) -> Generator[Dict[str, TensorCheckpoint], None, None]:
+) -> Generator[dict[str, TensorCheckpoint], None, None]:
     r"""Contextmanager that exits by rolling back a module's state_dict.
 
     Args:
@@ -101,16 +102,16 @@ def module_rollback_ctx(
         name_filter: Optional Boolean function used to filter items by name.
         checkpoint: Optional cache of values and tensor metadata specifying the rollback
             state for the module (or some subset thereof).
-        **tkwargs: Keyword arguments passed to `torch.Tensor.to` when copying data from
-            each tensor in `module.state_dict()` to the internally created checkpoint.
-            Only adhered to when the `checkpoint` argument is None.
+        **tkwargs: Keyword arguments passed to ``torch.Tensor.to`` when copying data
+            from each tensor in ``module.state_dict()`` to the internally created
+            checkpoint. Only adhered to when the ``checkpoint`` argument is None.
 
     Yields:
         A dictionary of TensorCheckpoints for the module's state_dict. Any in-places
         changes to the checkpoint will be observed at rollback time. If the checkpoint
         is cleared, no rollback will occur.
     """
-    # Create copies of the orginal values
+    # Create copies of the original values
     if checkpoint is None:
         checkpoint = {
             name: TensorCheckpoint(
@@ -139,7 +140,7 @@ def module_rollback_ctx(
 
 @contextmanager
 def zero_grad_ctx(
-    parameters: Union[Dict[str, Tensor], Iterable[Tensor]],
+    parameters: dict[str, Tensor] | Iterable[Tensor],
     zero_on_enter: bool = True,
     zero_on_exit: bool = False,
 ) -> Generator[None, None, None]:

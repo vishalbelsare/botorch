@@ -8,8 +8,9 @@ r"""Utilities for fitting and manipulating models."""
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from re import Pattern
-from typing import Any, Callable, Dict, Iterator, NamedTuple, Optional, Tuple, Union
+from typing import Any, NamedTuple
 from warnings import warn
 
 import torch
@@ -37,9 +38,9 @@ def get_data_loader(
 
 def get_parameters(
     module: Module,
-    requires_grad: Optional[bool] = None,
-    name_filter: Optional[Callable[[str], bool]] = None,
-) -> Dict[str, Tensor]:
+    requires_grad: bool | None = None,
+    name_filter: Callable[[str], bool] | None = None,
+) -> dict[str, Tensor]:
     r"""Helper method for obtaining a module's parameters and their respective ranges.
 
     Args:
@@ -66,10 +67,10 @@ def get_parameters(
 
 def get_parameters_and_bounds(
     module: Module,
-    requires_grad: Optional[bool] = None,
-    name_filter: Optional[Callable[[str], bool]] = None,
-    default_bounds: Tuple[float, float] = (-float("inf"), float("inf")),
-) -> Tuple[Dict[str, Tensor], Dict[str, Tuple[Optional[float], Optional[float]]]]:
+    requires_grad: bool | None = None,
+    name_filter: Callable[[str], bool] | None = None,
+    default_bounds: tuple[float, float] = (-float("inf"), float("inf")),
+) -> tuple[dict[str, Tensor], dict[str, tuple[float | None, float | None]]]:
     r"""Helper method for obtaining a module's parameters and their respective ranges.
 
     Args:
@@ -78,7 +79,7 @@ def get_parameters_and_bounds(
         requires_grad: Optional Boolean used to filter parameters based on whether
             or not their require_grad attribute matches the user provided value.
         default_bounds: Default lower and upper bounds for constrained parameters
-            with `None` typed bounds.
+            with ``None`` typed bounds.
 
     Returns:
         A dictionary of parameters and a dictionary of parameter bounds.
@@ -108,11 +109,11 @@ def get_parameters_and_bounds(
 
 
 def get_name_filter(
-    patterns: Iterator[Union[Pattern, str]]
-) -> Callable[[Union[str, Tuple[str, Any, ...]]], bool]:
+    patterns: Iterator[Pattern | str],
+) -> Callable[[str | tuple[str, Any, ...]], bool]:
     r"""Returns a binary function that filters strings (or iterables whose first
     element is a string) according to a bank of excluded patterns. Typically, used
-    in conjunction with generators such as `module.named_parameters()`.
+    in conjunction with generators such as ``module.named_parameters()``.
 
     Args:
         patterns: A collection of regular expressions or strings that
@@ -134,7 +135,7 @@ def get_name_filter(
                 f"but found {type(pattern)}."
             )
 
-    def name_filter(item: Union[str, Tuple[str, Any, ...]]) -> bool:
+    def name_filter(item: str | tuple[str, Any, ...]) -> bool:
         name = item if isinstance(item, str) else next(iter(item))
         if name in names:
             return False
@@ -162,11 +163,17 @@ def sample_all_priors(model: GPyTorchModel, max_retries: int = 100) -> None:
         for i in range(max_retries):
             try:
                 # Set sample shape, so that the prior samples have the same shape
-                # as `closure(module)` without having to be repeated.
-                closure_shape = closure(module).shape
+                # as ``closure(module)`` without having to be repeated.
                 prior_shape = prior._extended_shape()
-                sample_shape = closure_shape[: -len(prior_shape)]
-                setting_closure(module, prior.sample(sample_shape=sample_shape))
+                if prior_shape.numel() == 1:
+                    # For a univariate prior we can sample the size of the closure.
+                    # Otherwise we will sample exactly the same value for all
+                    # lengthscales where we commonly specify a univariate prior.
+                    setting_closure(module, prior.sample(closure(module).shape))
+                else:
+                    closure_shape = closure(module).shape
+                    sample_shape = closure_shape[: -len(prior_shape)]
+                    setting_closure(module, prior.sample(sample_shape=sample_shape))
                 break
             except NotImplementedError:
                 warn(

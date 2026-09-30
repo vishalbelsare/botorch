@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, InitVar
 from itertools import chain
-from typing import Any, Optional, Sequence
+from typing import Any
 
 import torch
 from botorch.utils.probability.utils import swap_along_dim_
@@ -32,18 +33,18 @@ def block_matrix_concat(blocks: Sequence[Sequence[Tensor]]) -> Tensor:
 def augment_cholesky(
     Laa: Tensor,
     Kbb: Tensor,
-    Kba: Optional[Tensor] = None,
-    Lba: Optional[Tensor] = None,
-    jitter: Optional[float] = None,
+    Kba: Tensor | None = None,
+    Lba: Tensor | None = None,
+    jitter: float | None = None,
 ) -> Tensor:
-    r"""Computes the Cholesky factor of a block matrix `K = [[Kaa, Kab], [Kba, Kbb]]`
-    based on a precomputed Cholesky factor `Kaa = Laa Laa^T`.
+    r"""Computes the Cholesky factor of a block matrix ``K = [[Kaa, Kab], [Kba, Kbb]]``
+    based on a precomputed Cholesky factor ``Kaa = Laa Laa^T``.
 
     Args:
         Laa: Cholesky factor of K's upper left block.
         Kbb: Lower-right block of K.
         Kba: Lower-left block of K.
-        Lba: Precomputed solve `Kba Laa^{-T}`.
+        Lba: Precomputed solve ``Kba Laa^{-T}``.
         jitter: Optional nugget to be added to the diagonal of Kbb.
     """
     if not (Kba is None) ^ (Lba is None):
@@ -70,12 +71,12 @@ def augment_cholesky(
     return block_matrix_concat(blocks=([pad(Laa, (0, n))], [Lba, Lbb]))
 
 
-@dataclass
+@dataclass(slots=True)
 class PivotedCholesky:
     step: int
     tril: Tensor
     perm: LongTensor
-    diag: Optional[Tensor] = None
+    diag: Tensor | None = None
     validate_init: InitVar[bool] = True
 
     def __post_init__(self, validate_init: bool = True):
@@ -113,17 +114,17 @@ class PivotedCholesky:
         L = self.tril
         Lii = self.tril[..., i, i].clone().clip(min=0).sqrt()
 
-        # Finalize `i-th` row and column of Cholesky factor
+        # Finalize ``i-th`` row and column of Cholesky factor
         L[..., i, i] = Lii
         L[..., i, i + 1 :] = 0
         L[..., i + 1 :, i] = L[..., i + 1 :, i].clone() / Lii.unsqueeze(-1)
 
-        # Update `tril(L[i + 1:, i + 1:])` to be the lower triangular part
-        # of the Schur complement of `cov` with respect to `cov[:i, :i]`.
+        # Update ``tril(L[i + 1:, i + 1:])`` to be the lower triangular part
+        # of the Schur complement of ``cov`` with respect to ``cov[:i, :i]``.
         rank1 = L[..., i + 1 :, i : i + 1].clone()
         rank1 = (rank1 * rank1.transpose(-1, -2)).tril()
         L[..., i + 1 :, i + 1 :] = L[..., i + 1 :, i + 1 :].clone() - rank1
-        L[Lii <= i * eps, i:, i] = 0  # numerical stability clause
+        L[..., i:, i][Lii <= i * eps] = 0  # numerical stability clause
         self.step += 1
 
     def pivot_(self, pivot: LongTensor) -> None:

@@ -10,13 +10,12 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import torch
-from botorch.optim.closures.core import (
-    as_ndarray,
-    get_tensors_as_ndarray_1d,
-    set_tensors_from_ndarray_1d,
-)
+from botorch.optim.closures.core import as_ndarray
 from botorch.optim.utils import get_bounds_as_ndarray
-from botorch.optim.utils.numpy_utils import torch_to_numpy_dtype_dict
+from botorch.optim.utils.numpy_utils import (
+    get_per_element_bounds,
+    torch_to_numpy_dtype_dict,
+)
 from botorch.utils.testing import BotorchTestCase
 from torch.nn import Parameter
 
@@ -44,7 +43,7 @@ class TestNumpyUtils(BotorchTestCase):
         self.assertFalse(np.shares_memory(base, result))
         self.assertEqual(result.dtype, np.float32)
 
-        # Test that `clone` does not get called on non-CPU tensors
+        # Test that ``clone`` does not get called on non-CPU tensors
         mock_tensor = MagicMock()
         mock_tensor.cpu.return_value = mock_tensor
         mock_tensor.device.return_value = "foo"
@@ -61,50 +60,6 @@ class TestNumpyUtils(BotorchTestCase):
             self.assertEqual(torch_dtype, tens.dtype)
             self.assertEqual(tens.numpy().dtype, np_dtype)
             self.assertEqual(as_ndarray(tens, np_dtype).dtype, np_dtype)
-
-    def test_get_tensors_as_ndarray_1d(self):
-        with self.assertRaisesRegex(RuntimeError, "Argument `tensors` .* is empty"):
-            get_tensors_as_ndarray_1d(())
-
-        values = get_tensors_as_ndarray_1d(self.parameters)
-        self.assertTrue(
-            np.allclose(values, get_tensors_as_ndarray_1d(self.parameters.values()))
-        )
-        n = 0
-        for param in self.parameters.values():
-            k = param.numel()
-            self.assertTrue(
-                np.allclose(values[n : n + k], param.view(-1).detach().cpu().numpy())
-            )
-            n += k
-
-        with self.assertRaisesRegex(ValueError, "Expected a vector for `out`"):
-            get_tensors_as_ndarray_1d(self.parameters, out=np.empty((1, 1)))
-
-        with self.assertRaisesRegex(ValueError, "Size of `parameters` .* not match"):
-            get_tensors_as_ndarray_1d(self.parameters, out=np.empty(values.size - 1))
-
-        with self.assertRaisesRegex(RuntimeError, "failed while copying values .* foo"):
-            get_tensors_as_ndarray_1d(
-                self.parameters,
-                out=np.empty(values.size),
-                as_array=MagicMock(side_effect=RuntimeError("foo")),
-            )
-
-    def test_set_tensors_from_ndarray_1d(self):
-        values = get_tensors_as_ndarray_1d(self.parameters)
-        others = np.random.rand(*values.shape).astype(values.dtype)
-        with self.assertRaisesRegex(RuntimeError, "failed while copying values to"):
-            set_tensors_from_ndarray_1d(self.parameters, np.empty([1]))
-
-        set_tensors_from_ndarray_1d(self.parameters, others)
-        n = 0
-        for param in self.parameters.values():
-            k = param.numel()
-            self.assertTrue(
-                np.allclose(others[n : n + k], param.view(-1).detach().cpu().numpy())
-            )
-            n += k
 
     def test_get_bounds_as_ndarray(self):
         params = {"a": torch.rand(1), "b": torch.rand(1), "c": torch.rand(2)}
@@ -137,3 +92,28 @@ class TestNumpyUtils(BotorchTestCase):
         test[2:, 1] = 1
         array = get_bounds_as_ndarray(parameters=params, bounds=bounds)
         self.assertTrue(np.array_equal(test, array))
+
+
+class TestGetPerElementBounds(BotorchTestCase):
+    def test_per_element_bounds(self):
+        parameters = {
+            "a": torch.zeros(2, 3),
+            "b": torch.zeros(2, 1),
+        }
+        bounds = {
+            "a": (0.0, 1.0),
+            "b": (-1.0, 2.0),
+        }
+        result = get_per_element_bounds(parameters, bounds, batch_shape=torch.Size([2]))
+        self.assertIsNotNone(result)
+        self.assertEqual(result.shape, (4, 2))
+        np.testing.assert_array_equal(result[:3, 0], 0.0)
+        np.testing.assert_array_equal(result[:3, 1], 1.0)
+        np.testing.assert_array_equal(result[3:, 0], -1.0)
+        np.testing.assert_array_equal(result[3:, 1], 2.0)
+
+    def test_all_inf_returns_none(self):
+        parameters = {"a": torch.zeros(2, 3)}
+        bounds = {}
+        result = get_per_element_bounds(parameters, bounds, batch_shape=torch.Size([2]))
+        self.assertIsNone(result)

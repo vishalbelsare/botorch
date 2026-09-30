@@ -4,7 +4,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from botorch.models.gp_regression import SingleTaskGP
 from botorch.models.kernels.contextual_lcea import LCEAKernel
@@ -20,8 +20,8 @@ class SACGP(SingleTaskGP):
         self,
         train_X: Tensor,
         train_Y: Tensor,
-        train_Yvar: Optional[Tensor],
-        decomposition: Dict[str, List[int]],
+        train_Yvar: Tensor | None,
+        decomposition: dict[str, list[int]],
     ) -> None:
         r"""
         Args:
@@ -46,12 +46,12 @@ class SACGP(SingleTaskGP):
     def construct_inputs(
         cls,
         training_data: SupervisedDataset,
-        decomposition: Dict[str, List[int]],
-    ) -> Dict[str, Any]:
-        r"""Construct `Model` keyword arguments from a dict of `SupervisedDataset`.
+        decomposition: dict[str, list[int]],
+    ) -> dict[str, Any]:
+        r"""Construct ``Model`` keyword arguments from a dict of ``SupervisedDataset``.
 
         Args:
-            training_data: A `SupervisedDataset` containing the training data.
+            training_data: A ``SupervisedDataset`` containing the training data.
             decomposition: Dictionary of context names and their indexes of the
                 corresponding active context parameters.
         """
@@ -73,13 +73,13 @@ class LCEAGP(SingleTaskGP):
         self,
         train_X: Tensor,
         train_Y: Tensor,
-        train_Yvar: Optional[Tensor],
-        decomposition: Dict[str, List[int]],
+        train_Yvar: Tensor | None,
+        decomposition: dict[str, list[int]],
         train_embedding: bool = True,
-        cat_feature_dict: Optional[Dict] = None,
-        embs_feature_dict: Optional[Dict] = None,
-        embs_dim_list: Optional[List[int]] = None,
-        context_weight_dict: Optional[Dict] = None,
+        cat_feature_dict: dict | None = None,
+        embs_feature_dict: dict | None = None,
+        embs_dim_list: list[int] | None = None,
+        context_weight_dict: dict | None = None,
     ) -> None:
         r"""
         Args:
@@ -102,7 +102,12 @@ class LCEAGP(SingleTaskGP):
                 dimension is set to 1 for each categorical variable.
             context_weight_dict: Known population weights of each context.
         """
-        super().__init__(train_X=train_X, train_Y=train_Y, train_Yvar=train_Yvar)
+        super().__init__(
+            train_X=train_X,
+            train_Y=train_Y,
+            train_Yvar=train_Yvar,
+            outcome_transform=None,
+        )
         self.covar_module = LCEAKernel(
             decomposition=decomposition,
             batch_shape=self._aug_batch_shape,
@@ -120,17 +125,17 @@ class LCEAGP(SingleTaskGP):
     def construct_inputs(
         cls,
         training_data: SupervisedDataset,
-        decomposition: Dict[str, List[str]],
+        decomposition: dict[str, list[str]],
         train_embedding: bool = True,
-        cat_feature_dict: Optional[Dict] = None,
-        embs_feature_dict: Optional[Dict] = None,
-        embs_dim_list: Optional[List[int]] = None,
-        context_weight_dict: Optional[Dict] = None,
-    ) -> Dict[str, Any]:
-        r"""Construct `Model` keyword arguments from a dict of `SupervisedDataset`.
+        cat_feature_dict: dict | None = None,
+        embs_feature_dict: dict | None = None,
+        embs_dim_list: list[int] | None = None,
+        context_weight_dict: dict | None = None,
+    ) -> dict[str, Any]:
+        r"""Construct ``Model`` keyword arguments from a dict of ``SupervisedDataset``.
 
         Args:
-            training_data: A `SupervisedDataset` containing the training data.
+            training_data: A ``SupervisedDataset`` containing the training data.
             decomposition: Dictionary of context names and the names of the
                 corresponding active context parameters.
             train_embedding: Whether to train the embedding layer or not.

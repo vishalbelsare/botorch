@@ -20,15 +20,15 @@ Contributor: andreaponti5
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple, Union
-
 import torch
-
 from botorch.acquisition import UpperConfidenceBound
 from botorch.acquisition.objective import PosteriorTransform
 from botorch.exceptions import UnsupportedError
 from botorch.models.model import Model
-from botorch.utils.transforms import t_batch_mode_transform
+from botorch.utils.transforms import (
+    average_over_ensemble_models,
+    t_batch_mode_transform,
+)
 from gpytorch.models import ExactGP
 from torch import Tensor
 
@@ -38,33 +38,33 @@ class AugmentedUpperConfidenceBound(UpperConfidenceBound):
 
     A modified version of the UCB for Multi Information Source, that consider
     the most optimistic improvement with respect to the best value observed so far.
-    The improvement is then penalized depending on source’s cost, and
+    The improvement is then penalized depending on source's cost, and
     the discrepancy between the GP associated to the source and the AGP.
 
     `AUCB(x, s, y^+) = ((mu(x) + sqrt(beta) * sigma(x)) - y^+)
     / (c(s) (1 + abs(mu(x) - mu_s(x))))`,
-    where `mu` and `sigma` are the posterior mean and standard deviation of the AGP,
-    `mu_s` is the posterior mean of the GP modelling the s-th source and
+    where ``mu`` and ``sigma`` are the posterior mean and standard deviation of the AGP,
+    ``mu_s`` is the posterior mean of the GP modelling the s-th source and
     c(s) is the cost of the source s.
     """
 
     def __init__(
         self,
         model: Model,
-        cost: Dict,
-        best_f: Union[float, Tensor],
-        beta: Union[float, Tensor],
-        posterior_transform: Optional[PosteriorTransform] = None,
+        cost: dict,
+        best_f: float | Tensor,
+        beta: float | Tensor,
+        posterior_transform: PosteriorTransform | None = None,
         maximize: bool = True,
     ) -> None:
         r"""Single-outcome Augmented Upper Confidence Bound.
 
         Args:
             model: A fitted single-outcome Augmented GP model.
-            beta: Either a scalar or a one-dim tensor with `b` elements (batch mode)
+            beta: Either a scalar or a one-dim tensor with ``b`` elements (batch mode)
                 representing the trade-off parameter between mean and covariance
             cost: A dictionary containing the cost of querying each source.
-            best_f: Either a scalar or a `b`-dim Tensor (batch mode) representing
+            best_f: Either a scalar or a ``b``-dim Tensor (batch mode) representing
                 the best function value observed so far (assumed noiseless).
             posterior_transform: A PosteriorTransform. If using a multi-output model,
                 a PosteriorTransform that transforms the multi-output posterior into a
@@ -83,15 +83,17 @@ class AugmentedUpperConfidenceBound(UpperConfidenceBound):
         self.best_f = best_f
 
     @t_batch_mode_transform(expected_q=1)
+    @average_over_ensemble_models
     def forward(self, X: Tensor) -> Tensor:
         r"""Evaluate the Upper Confidence Bound on the candidate set X.
 
         Args:
-            X: A `(b1 x ... bk) x 1 x d`-dim batched tensor of `d`-dim design points.
+            X: A ``(b1 x ... bk) x 1 x d``-dim batched tensor of ``d``-dim
+                design points.
 
         Returns:
-            A `(b1 x ... bk)`-dim tensor of Augmented Upper Confidence Bound values at
-            the given design points `X`.
+            A ``(b1 x ... bk)``-dim tensor of Augmented Upper Confidence Bound values at
+            the given design points ``X``.
         """
         alpha = torch.zeros(X.shape[0], dtype=X.dtype, device=X.device)
         agp_mean, agp_sigma = self._mean_and_sigma(X[..., :-1])
@@ -119,11 +121,11 @@ class AugmentedUpperConfidenceBound(UpperConfidenceBound):
         model: ExactGP = None,
         compute_sigma: bool = True,
         min_var: float = 1e-12,
-    ) -> Tuple[Tensor, Optional[Tensor]]:
+    ) -> tuple[Tensor, Tensor | None]:
         r"""Computes the first and second moments of the model posterior.
 
         Args:
-            X: `batch_shape x q x d`-dim Tensor of model inputs.
+            X: ``batch_shape x q x d``-dim Tensor of model inputs.
             model: the model to use. If None, self is used.
             compute_sigma: Boolean indicating whether to compute the second
                 moment (default: True).

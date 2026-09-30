@@ -1,4 +1,4 @@
-:github_url: https://github.com/pytorch/botorch
+:github_url: https://github.com/meta-pytorch/botorch
 
 BoTorch API Reference
 ===================================
@@ -22,6 +22,7 @@ BoTorch API Reference
    settings
    logging
    test_functions
+   test_utils
    exceptions
    utils
 

@@ -74,15 +74,21 @@ class TestContainers(BotorchTestCase):
             self.assertEqual(X.device, values.device)
             self.assertEqual(X.dtype, values.dtype)
 
-            # Test `shape` property
+            # Test ``shape`` property
             self.assertEqual(X.shape, values.shape)
 
-            # Test `__eq__`
-            self.assertEqual(X, DenseContainer(values, event_shape))
-            self.assertNotEqual(X, DenseContainer(torch.rand_like(values), event_shape))
+            # Test ``__eq__``
+            self.assertEqual(X, DenseContainer(values=values, event_shape=event_shape))
+            self.assertNotEqual(
+                X,
+                DenseContainer(values=torch.rand_like(values), event_shape=event_shape),
+            )
 
-            # Test `__call__`
+            # Test ``__call__``
             self.assertTrue(X().equal(values))
+
+            # Test ``clone``
+            self.assertEqual(X.clone(), X)
 
     def test_slice(self):
         for arity in (2, 4):
@@ -102,18 +108,30 @@ class TestContainers(BotorchTestCase):
                     )
 
                 # Test some basic propeties
-                groups = SliceContainer(vals, indices, event_shape=event_shape)
+                groups = SliceContainer(
+                    values=vals, indices=indices, event_shape=event_shape
+                )
                 self.assertEqual(groups.device, vals.device)
                 self.assertEqual(groups.dtype, vals.dtype)
                 self.assertEqual(groups.shape, groups().shape)
 
-                # Test `__eq__`
-                self.assertEqual(groups, SliceContainer(vals, indices, event_shape))
+                # Test ``__eq__``
+                self.assertEqual(
+                    groups,
+                    SliceContainer(
+                        values=vals, indices=indices, event_shape=event_shape
+                    ),
+                )
                 self.assertNotEqual(
-                    groups, SliceContainer(torch.rand_like(vals), indices, event_shape)
+                    groups,
+                    SliceContainer(
+                        values=torch.rand_like(vals),
+                        indices=indices,
+                        event_shape=event_shape,
+                    ),
                 )
 
-                # Test `__call__`
+                # Test ``__call__``
                 dense = groups()
                 index = int(torch.randint(high=len(dense), size=()))
                 other = torch.cat([vals[i] for i in indices[index]])

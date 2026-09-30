@@ -7,27 +7,24 @@
 from __future__ import annotations
 
 import math
-
+from collections.abc import Callable, Iterable, Iterator
 from functools import lru_cache
 from math import pi
-from numbers import Number
-from typing import Any, Callable, Iterable, Iterator, Optional, Tuple, Union
+from typing import Any
 
 import torch
 from botorch.utils.safe_math import logdiffexp
 from numpy.polynomial.legendre import leggauss as numpy_leggauss
 from torch import BoolTensor, LongTensor, Tensor
 
-CaseNd = Tuple[Callable[[], BoolTensor], Callable[[BoolTensor], Tensor]]
+CaseNd = tuple[Callable[[], BoolTensor], Callable[[BoolTensor], Tensor]]
 
 _log_2 = math.log(2)
-_sqrt_pi = math.sqrt(pi)
-_inv_sqrt_pi = 1 / _sqrt_pi
 _inv_sqrt_2pi = 1 / math.sqrt(2 * pi)
 _inv_sqrt_2 = 1 / math.sqrt(2)
 _neg_inv_sqrt_2 = -_inv_sqrt_2
 _log_sqrt_2pi = math.log(2 * pi) / 2
-STANDARDIZED_RANGE: Tuple[float, float] = (-1e6, 1e6)
+STANDARDIZED_RANGE: tuple[float, float] = (-1e6, 1e6)
 _log_two_inv_sqrt_2pi = _log_2 - _log_sqrt_2pi  # = log(2 / sqrt(2 * pi))
 
 
@@ -40,10 +37,11 @@ def case_dispatcher(
 
     Args:
         out: Tensor to which case outcomes are written.
-        cases: Iterable of function pairs (pred, func), where `mask=pred()` specifies
-            whether `func` is applicable for each entry in `out`. Note that cases are
-            resolved first-come, first-serve.
-        default: Optional `func` to which all unclaimed entries of `out` are dispatched.
+        cases: Iterable of function pairs (pred, func), where ``mask=pred()``
+            specifies whether ``func`` is applicable for each entry in ``out``. Note
+            that cases are resolved first-come, first-serve.
+        default: Optional ``func`` to which all unclaimed entries of ``out`` are
+            dispatched.
     """
     active = None
     for closure, func in cases:
@@ -77,32 +75,10 @@ def case_dispatcher(
     return out
 
 
-@lru_cache(maxsize=None)
-def get_constants(
-    values: Union[Number, Iterator[Number]],
-    device: Optional[torch.device] = None,
-    dtype: Optional[torch.dtype] = None,
-) -> Union[Tensor, Tuple[Tensor, ...]]:
-    r"""Returns scalar-valued Tensors containing each of the given constants.
-    Used to expedite tensor operations involving scalar arithmetic. Note that
-    the returned Tensors should not be modified in-place."""
-    if isinstance(values, Number):
-        return torch.full((), values, dtype=dtype, device=device)
-
-    return tuple(torch.full((), val, dtype=dtype, device=device) for val in values)
-
-
-def get_constants_like(
-    values: Union[Number, Iterator[Number]],
-    ref: Tensor,
-) -> Union[Tensor, Iterator[Tensor]]:
-    return get_constants(values, device=ref.device, dtype=ref.dtype)
-
-
 def gen_positional_indices(
     shape: torch.Size,
     dim: int,
-    device: Optional[torch.device] = None,
+    device: torch.device | None = None,
 ) -> Iterator[torch.LongTensor]:
     ndim = len(shape)
     _dim = ndim + dim if dim < 0 else dim
@@ -118,33 +94,30 @@ def gen_positional_indices(
 def build_positional_indices(
     shape: torch.Size,
     dim: int,
-    device: Optional[torch.device] = None,
+    device: torch.device | None = None,
 ) -> LongTensor:
     return sum(gen_positional_indices(shape=shape, dim=dim, device=device))
 
 
 @lru_cache(maxsize=None)
-def leggauss(deg: int, **tkwargs: Any) -> Tuple[Tensor, Tensor]:
+def leggauss(deg: int, **tkwargs: Any) -> tuple[Tensor, Tensor]:
     x, w = numpy_leggauss(deg)
     return torch.as_tensor(x, **tkwargs), torch.as_tensor(w, **tkwargs)
 
 
 def ndtr(x: Tensor) -> Tensor:
     r"""Standard normal CDF."""
-    half, neg_inv_sqrt_2 = get_constants_like((0.5, _neg_inv_sqrt_2), x)
-    return half * torch.erfc(neg_inv_sqrt_2 * x)
+    return 0.5 * torch.erfc(_neg_inv_sqrt_2 * x)
 
 
 def phi(x: Tensor) -> Tensor:
     r"""Standard normal PDF."""
-    inv_sqrt_2pi, neg_half = get_constants_like((_inv_sqrt_2pi, -0.5), x)
-    return inv_sqrt_2pi * (neg_half * x.square()).exp()
+    return _inv_sqrt_2pi * (-0.5 * x.square()).exp()
 
 
 def log_phi(x: Tensor) -> Tensor:
     r"""Logarithm of standard normal pdf"""
-    log_sqrt_2pi, neg_half = get_constants_like((_log_sqrt_2pi, -0.5), x)
-    return neg_half * x.square() - log_sqrt_2pi
+    return -0.5 * x.square() - _log_sqrt_2pi
 
 
 def log_ndtr(x: Tensor) -> Tensor:
@@ -160,10 +133,9 @@ def log_ndtr(x: Tensor) -> Tensor:
     if not (x.dtype == torch.float32 or x.dtype == torch.float64):
         raise TypeError(
             f"log_Phi only supports torch.float32 and torch.float64 "
-            f"dtypes, but received {x.dtype = }."
+            f"dtypes, but received {x.dtype=}."
         )
-    neg_inv_sqrt_2, log_2 = get_constants_like((_neg_inv_sqrt_2, _log_2), x)
-    return log_erfc(neg_inv_sqrt_2 * x) - log_2
+    return log_erfc(_neg_inv_sqrt_2 * x) - _log_2
 
 
 def log_erfc(x: Tensor) -> Tensor:
@@ -180,7 +152,7 @@ def log_erfc(x: Tensor) -> Tensor:
     if not (x.dtype == torch.float32 or x.dtype == torch.float64):
         raise TypeError(
             f"log_erfc only supports torch.float32 and torch.float64 "
-            f"dtypes, but received {x.dtype = }."
+            f"dtypes, but received {x.dtype=}."
         )
     is_pos = x > 0
     x_pos = x.masked_fill(~is_pos, 0)
@@ -215,18 +187,17 @@ def log_erfcx(x: Tensor) -> Tensor:
 
 def standard_normal_log_hazard(x: Tensor) -> Tensor:
     """Computes the logarithm of the hazard function of the standard normal
-    distribution, i.e. `log(phi(x) / Phi(-x))`.
+    distribution, i.e. ``log(phi(x) / Phi(-x))``.
 
     Args:
         x: A tensor of any shape, with either float32 or float64 dtypes.
 
     Returns:
-        A Tensor of the same shape `x`, containing the values of the logarithm of the
-        hazard function evaluated at `x`.
+        A Tensor of the same shape ``x``, containing the values of the logarithm of the
+        hazard function evaluated at ``x``.
     """
     # NOTE: using _inv_sqrt_2 instead of _neg_inv_sqrt_2 means we are computing Phi(-x).
-    a, b = get_constants_like((_log_two_inv_sqrt_2pi, _inv_sqrt_2), x)
-    return a - log_erfcx(b * x)
+    return _log_two_inv_sqrt_2pi - log_erfcx(_inv_sqrt_2 * x)
 
 
 def log_prob_normal_in(a: Tensor, b: Tensor) -> Tensor:
@@ -258,27 +229,27 @@ def log_prob_normal_in(a: Tensor, b: Tensor) -> Tensor:
 
 def swap_along_dim_(
     values: Tensor,
-    i: Union[int, LongTensor],
-    j: Union[int, LongTensor],
+    i: int | LongTensor,
+    j: int | LongTensor,
     dim: int,
-    buffer: Optional[Tensor] = None,
+    buffer: Tensor | None = None,
 ) -> Tensor:
-    r"""Swaps Tensor slices in-place along dimension `dim`.
+    r"""Swaps Tensor slices in-place along dimension ``dim``.
 
-    When passed as Tensors, `i` (and `j`) should be `dim`-dimensional tensors
-    with the same shape as `values.shape[:dim]`. The xception to this rule occurs
-    when `dim=0`, in which case `i` (and `j`) should be (at most) one-dimensional
+    When passed as Tensors, ``i`` (and ``j``) should be ``dim``-dimensional tensors
+    with the same shape as ``values.shape[:dim]``. The exception to this rule occurs
+    when ``dim=0``, in which case ``i`` (and ``j``) should be (at most) one-dimensional
     when passed as a Tensor.
 
     Args:
         values: Tensor whose values are to be swapped.
-        i: Indices for slices along dimension `dim`.
-        j: Indices for slices along dimension `dim`.
-        dim: The dimension of `values` along which to swap slices.
+        i: Indices for slices along dimension ``dim``.
+        j: Indices for slices along dimension ``dim``.
+        dim: The dimension of ``values`` along which to swap slices.
         buffer: Optional buffer used internally to store copied values.
 
     Returns:
-        The original `values` tensor.
+        The original ``values`` tensor.
     """
     dim = values.ndim + dim if dim < 0 else dim
     if dim and (
@@ -325,3 +296,92 @@ def swap_along_dim_(
         values[j] = buffer
 
     return values
+
+
+def compute_log_prob_feas_from_bounds(
+    con_lower_inds: Tensor,
+    con_upper_inds: Tensor,
+    con_both_inds: Tensor,
+    con_lower: Tensor,
+    con_upper: Tensor,
+    con_both: Tensor,
+    means: Tensor,
+    sigmas: Tensor,
+) -> Tensor:
+    r"""Compute logarithm of the feasibility probability for each batch of mean/sigma.
+
+    Args:
+        means: A ``(b) x m``-dim Tensor of means.
+        sigmas: A ``(b) x m``-dim Tensor of standard deviations.
+        con_lower_inds: 1d Tensor of indices con_lower applies to
+            in the second dimension of means and sigmas.
+        con_upper_inds: 1d Tensor of indices con_upper applies to
+            in the second dimension of means and sigmas.
+        con_both_inds: 1d Tensor of indices con_both applies to
+            in the second dimension of means and sigmas.
+        con_lower: 1d Tensor of lower bounds on the constraints
+            equal in dimension to con_lower_inds.
+        con_upper: 1d Tensor of upper bounds on the constraints
+            equal in dimension to con_upper_inds.
+        con_both: 2d Tensor of "both" bounds on the constraints
+            equal in length to con_both_inds.
+
+    Returns:
+        A ``(b)``-dim tensor of log feasibility probabilities
+    """
+    # indices are integers, so we don't cast the type
+    con_upper_inds = con_upper_inds.to(device=means.device)
+    con_lower_inds = con_lower_inds.to(device=means.device)
+    con_both_inds = con_both_inds.to(device=means.device)
+
+    con_lower = con_lower.to(device=means.device, dtype=means.dtype)
+    con_upper = con_upper.to(device=means.device, dtype=means.dtype)
+    con_both = con_both.to(device=means.device, dtype=means.dtype)
+
+    log_prob = torch.zeros_like(means[..., 0])
+    if len(con_lower_inds) > 0:
+        i = con_lower_inds
+        dist_l = (con_lower - means[..., i]) / sigmas[..., i]
+        log_prob = log_prob + log_ndtr(-dist_l).sum(dim=-1)  # 1 - Phi(x) = Phi(-x)
+    if len(con_upper_inds) > 0:
+        i = con_upper_inds
+        dist_u = (con_upper - means[..., i]) / sigmas[..., i]
+        log_prob = log_prob + log_ndtr(dist_u).sum(dim=-1)
+    if len(con_both_inds) > 0:
+        i = con_both_inds
+        con_lower, con_upper = con_both[:, 0], con_both[:, 1]
+        # scaled distance to lower and upper constraint boundary:
+        dist_l = (con_lower - means[..., i]) / sigmas[..., i]
+        dist_u = (con_upper - means[..., i]) / sigmas[..., i]
+        log_prob = log_prob + log_prob_normal_in(a=dist_l, b=dist_u).sum(dim=-1)
+    return log_prob
+
+
+def percentile_of_score(data: Tensor, score: Tensor, dim: int = -1) -> Tensor:
+    """Compute the percentile rank of ``score`` relative to ``data``.
+    For example, if this function returns 70 then 70% of the
+    values in ``data`` are below ``score``.
+
+    This implementation is based on ``scipy.stats.percentileofscore``,
+    with ``kind='rank'`` and ``nan_policy='propagate'``, which is the default.
+
+    Args:
+        data: A ``... x n x output_shape``-dim Tensor of data.
+        score: A ``... x 1 x output_shape``-dim Tensor of scores.
+
+    Returns:
+        A ``... x output_shape``-dim Tensor of percentile ranks.
+    """
+    # based on scipy.stats.percentileofscore
+    left = torch.count_nonzero(data < score, dim=dim)
+    right = torch.count_nonzero(data <= score, dim=dim)
+    plus1 = left < right
+    perct = (left + right + plus1) * (50.0 / data.shape[dim])
+    # perct shape: ``... x output_shape``
+    # fill in nans due to current trial progression being nan
+    nan_mask = torch.broadcast_to(torch.isnan(score.squeeze(dim)), perct.shape)
+    perct[nan_mask] = torch.nan
+    # fill in nans due to previous trial progressions being nan
+    nan_mask = torch.broadcast_to(torch.any(torch.isnan(data), dim=dim), perct.shape)
+    perct[nan_mask] = torch.nan
+    return perct

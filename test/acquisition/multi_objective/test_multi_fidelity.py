@@ -8,7 +8,6 @@ import warnings
 from unittest import mock
 
 import torch
-from botorch import settings
 from botorch.acquisition.multi_objective.multi_fidelity import MOMF
 from botorch.acquisition.multi_objective.objective import IdentityMCMultiOutputObjective
 from botorch.exceptions.errors import BotorchError
@@ -32,7 +31,7 @@ class TestMOMF(BotorchTestCase):
                 [[4.0, 5.0], [5.0, 5.0], [8.5, 3.5], [8.5, 3.0], [9.0, 1.0]], **tkwargs
             )
             partitioning = NondominatedPartitioning(ref_point=t_ref_point)
-            # the event shape is `b x q x m` = 1 x 1 x 2
+            # the event shape is ``b x q x m`` = 1 x 1 x 2
             samples = torch.zeros(1, 1, 2, **tkwargs)
             mm = MockModel(MockPosterior(samples=samples))
             # test error if there is not pareto_Y initialized in partitioning
@@ -149,11 +148,11 @@ class TestMOMF(BotorchTestCase):
             acqf.model._posterior._samples = torch.zeros(1, 2, 2, **tkwargs)
             res = acqf(X)
             X2 = torch.zeros(1, 1, 1, requires_grad=True, **tkwargs)
-            with warnings.catch_warnings(record=True) as ws, settings.debug(True):
+            with warnings.catch_warnings(record=True) as ws:
                 acqf.set_X_pending(X2)
-                self.assertEqual(acqf.X_pending, X2)
-                self.assertEqual(len(ws), 1)
-                self.assertTrue(issubclass(ws[-1].category, BotorchWarning))
+            self.assertEqual(acqf.X_pending, X2)
+            self.assertEqual(len(ws), 1)
+            self.assertTrue(issubclass(ws[-1].category, BotorchWarning))
 
             # test objective
             acqf = MOMF(

@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any
 
 import torch
 from botorch.exceptions import UnsupportedError
@@ -22,23 +22,23 @@ class LinearTruncatedFidelityKernel(Kernel):
     r"""GPyTorch Linear Truncated Fidelity Kernel.
 
     Computes a covariance matrix based on the Linear truncated kernel between
-    inputs `x_1` and `x_2` for up to two fidelity parmeters:
+    inputs ``x_1`` and ``x_2`` for up to two fidelity parameters:
 
         K(x_1, x_2) = k_0 + c_1(x_1, x_2)k_1 + c_2(x_1,x_2)k_2 + c_3(x_1,x_2)k_3
 
     where
 
-    - `k_i(i=0,1,2,3)` are Matern kernels calculated between non-fidelity
-        parameters of `x_1` and `x_2` with different priors.
-    - `c_1=(1 - x_1[f_1])(1 - x_2[f_1]))(1 + x_1[f_1] x_2[f_1])^p` is the kernel
-        of the the bias term, which can be decomposed into a determistic part
-        and a polynomial kernel. Here `f_1` is the first fidelity dimension and
-        `p` is the order of the polynomial kernel.
-    - `c_3` is the same as `c_1` but is calculated for the second fidelity
-        dimension `f_2`.
-    - `c_2` is the interaction term with four deterministic terms and the
-        polynomial kernel between `x_1[..., [f_1, f_2]]` and
-        `x_2[..., [f_1, f_2]]`.
+    - ``k_i(i=0,1,2,3)`` are Matern kernels calculated between non-fidelity
+        parameters of ``x_1`` and ``x_2`` with different priors.
+    - ``c_1=(1 - x_1[f_1])(1 - x_2[f_1]))(1 + x_1[f_1] x_2[f_1])^p`` is the kernel
+        of the bias term, which can be decomposed into a deterministic part
+        and a polynomial kernel. Here ``f_1`` is the first fidelity dimension and
+        ``p`` is the order of the polynomial kernel.
+    - ``c_3`` is the same as ``c_1`` but is calculated for the second fidelity
+        dimension ``f_2``.
+    - ``c_2`` is the interaction term with four deterministic terms and the
+        polynomial kernel between ``x_1[..., [f_1, f_2]]`` and
+        ``x_2[..., [f_1, f_2]]``.
 
     Example:
         >>> x = torch.randn(10, 5)
@@ -54,46 +54,46 @@ class LinearTruncatedFidelityKernel(Kernel):
 
     def __init__(  # noqa C901
         self,
-        fidelity_dims: List[int],
-        dimension: Optional[int] = None,
-        power_prior: Optional[Prior] = None,
-        power_constraint: Optional[Interval] = None,
+        fidelity_dims: list[int],
+        dimension: int | None = None,
+        power_prior: Prior | None = None,
+        power_constraint: Interval | None = None,
         nu: float = 2.5,
-        lengthscale_prior_unbiased: Optional[Prior] = None,
-        lengthscale_prior_biased: Optional[Prior] = None,
-        lengthscale_constraint_unbiased: Optional[Interval] = None,
-        lengthscale_constraint_biased: Optional[Interval] = None,
-        covar_module_unbiased: Optional[Kernel] = None,
-        covar_module_biased: Optional[Kernel] = None,
+        lengthscale_prior_unbiased: Prior | None = None,
+        lengthscale_prior_biased: Prior | None = None,
+        lengthscale_constraint_unbiased: Interval | None = None,
+        lengthscale_constraint_biased: Interval | None = None,
+        covar_module_unbiased: Kernel | None = None,
+        covar_module_biased: Kernel | None = None,
         **kwargs: Any,
     ) -> None:
         """
         Args:
             fidelity_dims: A list containing either one or two indices specifying
                 the fidelity parameters of the input.
-            dimension: The dimension of `x`. Unused if `active_dims` is specified.
+            dimension: The dimension of ``x``. Unused if ``active_dims`` is specified.
             power_prior: Prior for the power parameter of the polynomial kernel.
-                Default is `None`.
+                Default is ``None``.
             power_constraint: Constraint on the power parameter of the polynomial
-                kernel. Default is `Positive`.
+                kernel. Default is ``Positive``.
             nu: The smoothness parameter for the Matern kernel: either 1/2, 3/2,
-                or 5/2. Unused if both `covar_module_unbiased` and
-                `covar_module_biased` are specified.
+                or 5/2. Unused if both ``covar_module_unbiased`` and
+                ``covar_module_biased`` are specified.
             lengthscale_prior_unbiased: Prior on the lengthscale parameter of Matern
-                kernel `k_0`. Default is `Gamma(1.1, 1/20)`.
+                kernel ``k_0``. Default is ``Gamma(1.1, 1/20)``.
             lengthscale_constraint_unbiased: Constraint on the lengthscale parameter
-                of the Matern kernel `k_0`. Default is `Positive`.
+                of the Matern kernel ``k_0``. Default is ``Positive``.
             lengthscale_prior_biased: Prior on the lengthscale parameter of Matern
-                kernels `k_i(i>0)`. Default is `Gamma(5, 1/20)`.
+                kernels ``k_i(i>0)``. Default is ``Gamma(5, 1/20)``.
             lengthscale_constraint_biased: Constraint on the lengthscale parameter
-                of the Matern kernels `k_i(i>0)`. Default is `Positive`.
-            covar_module_unbiased: Specify a custom kernel for `k_0`. If omitted,
-                use a `MaternKernel`.
+                of the Matern kernels ``k_i(i>0)``. Default is ``Positive``.
+            covar_module_unbiased: Specify a custom kernel for ``k_0``. If omitted,
+                use a ``MaternKernel``.
             covar_module_biased: Specify a custom kernel for the biased parts
-                `k_i(i>0)`. If omitted, use a `MaternKernel`.
+                ``k_i(i>0)``. If omitted, use a ``MaternKernel``.
             batch_shape: If specified, use a separate lengthscale for each batch of
-                input data. If `x1` is a `batch_shape x n x d` tensor, this should
-                be `batch_shape`.
+                input data. If ``x1`` is a ``batch_shape x n x d`` tensor, this should
+                be ``batch_shape``.
             active_dims: Compute the covariance of a subset of input dimensions. The
                 numbers correspond to the indices of the dimensions.
         """

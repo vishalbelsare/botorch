@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, List, Optional
+from collections.abc import Callable
+from typing import Any
 
 from botorch.models.approximate_gp import ApproximateGPyTorchModel
 from botorch.models.model_list_gp_regression import ModelListGP
@@ -22,6 +23,7 @@ from botorch.sampling.pathwise.utils import (
 )
 from botorch.utils.dispatcher import Dispatcher
 from botorch.utils.sampling import draw_sobol_normal_samples
+from botorch.utils.transforms import is_ensemble
 from gpytorch.kernels import Kernel
 from gpytorch.models import ApproximateGP, ExactGP, GP
 from gpytorch.variational import _VariationalStrategy
@@ -37,10 +39,10 @@ def draw_kernel_feature_paths(
 ) -> GeneralizedLinearPath:
     r"""Draws functions from a Bayesian-linear-model-based approximation to a GP prior.
 
-    When evaluted, sample paths produced by this method return Tensors with dimensions
-    `sample_dims x batch_dims x [joint_dim]`, where `joint_dim` denotes the penultimate
-    dimension of the input tensor. For multioutput models, outputs are returned as the
-    final batch dimension.
+    When evaluated, sample paths produced by this method return Tensors with dimensions
+    ``sample_dims x batch_dims x [joint_dim]``, where ``joint_dim`` denotes the
+    penultimate dimension of the input tensor. For multioutput models, outputs are
+    returned as the final batch dimension.
 
     Args:
         model: The prior over functions.
@@ -51,16 +53,16 @@ def draw_kernel_feature_paths(
 
 def _draw_kernel_feature_paths_fallback(
     num_inputs: int,
-    mean_module: Optional[Module],
+    mean_module: Module | None,
     covar_module: Kernel,
     sample_shape: Size,
     num_features: int = 1024,
     map_generator: TKernelFeatureMapGenerator = gen_kernel_features,
-    input_transform: Optional[TInputTransform] = None,
-    output_transform: Optional[TOutputTransform] = None,
-    weight_generator: Optional[Callable[[Size], Tensor]] = None,
+    input_transform: TInputTransform | None = None,
+    output_transform: TOutputTransform | None = None,
+    weight_generator: Callable[[Size], Tensor] | None = None,
+    is_ensemble: bool = False,
 ) -> GeneralizedLinearPath:
-
     # Generate a kernel feature map
     feature_map = map_generator(
         kernel=covar_module,
@@ -70,6 +72,7 @@ def _draw_kernel_feature_paths_fallback(
 
     # Sample random weights with which to combine kernel features
     if weight_generator is None:
+        # weight is sample_shape x batch_shape x num_outputs
         weight = draw_sobol_normal_samples(
             n=sample_shape.numel() * covar_module.batch_shape.numel(),
             d=feature_map.num_outputs,
@@ -88,6 +91,7 @@ def _draw_kernel_feature_paths_fallback(
         bias_module=mean_module,
         input_transform=input_transform,
         output_transform=output_transform,
+        is_ensemble=is_ensemble,
     )
 
 
@@ -102,6 +106,7 @@ def _draw_kernel_feature_paths_ExactGP(
         covar_module=model.covar_module,
         input_transform=get_input_transform(model),
         output_transform=get_output_transform(model),
+        is_ensemble=is_ensemble(model),
         **kwargs,
     )
 
@@ -109,7 +114,7 @@ def _draw_kernel_feature_paths_ExactGP(
 @DrawKernelFeaturePaths.register(ModelListGP)
 def _draw_kernel_feature_paths_list(
     model: ModelListGP,
-    join: Optional[Callable[[List[Tensor]], Tensor]] = None,
+    join: Callable[[list[Tensor]], Tensor] | None = None,
     **kwargs: Any,
 ) -> PathList:
     paths = [draw_kernel_feature_paths(m, **kwargs) for m in model.models]
@@ -149,5 +154,6 @@ def _draw_kernel_feature_paths_ApproximateGP_fallback(
         num_inputs=num_inputs,
         mean_module=model.mean_module,
         covar_module=model.covar_module,
+        is_ensemble=is_ensemble(model),
         **kwargs,
     )

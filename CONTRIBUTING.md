@@ -8,7 +8,7 @@ To get the development installation with all the necessary dependencies for
 linting, testing, and building the documentation, run the following:
 
 ```bash
-git clone https://github.com/pytorch/botorch.git
+git clone https://github.com/meta-pytorch/botorch.git
 cd botorch
 pip install -e ".[dev]"
 ```
@@ -39,6 +39,13 @@ flake8 .
 
 from the repository root.
 
+#### Pre-commit hooks
+
+Contributors can use [pre-commit](https://pre-commit.com/) to run `ufmt` and
+`flake8` as part of the commit process. To install the hooks, install `pre-commit`
+via `pip install pre-commit` and run `pre-commit install` from the repository
+root.
+
 #### Docstring formatting
 
 BoTorch uses
@@ -50,7 +57,7 @@ every `__init__` function contains an `Args:` block. We use the
 
 #### Type Hints
 
-BoTorch is fully typed using python 3.10+
+BoTorch is fully typed using python 3.11+
 [type hints](https://www.python.org/dev/peps/pep-0484/). We expect any
 contributions to also use proper type annotations. While we currently do not
 enforce full consistency of these in our continuous integration test, you should
@@ -89,7 +96,7 @@ code can be found in the [website](/website/) folder). It is built using
    [Sphinx](http://www.sphinx-doc.org), and embedded into the Docusaurus
    website. The sphinx .rst source files for this live in
    [sphinx/source](/sphinx/source/).
-3. The Jupyter notebook tutorials, parsed by `nbconvert`, and embedded into the
+3. The Jupyter notebook tutorials, parsed and converted to MDX, and embedded into the
    Docusaurus website. These live in [tutorials](/tutorials/).
 
 To build the documentation you will need [Node](https://nodejs.org/en/) >= 8.x
@@ -100,6 +107,19 @@ The following command will both build the docs and serve the site locally:
 ```bash
 ./scripts/build_docs.sh
 ```
+
+See the [website/README.md](website/README.md) for more details.
+
+##### Adding a new tutorial or community notebook
+
+The website only renders notebooks registered in a JSON manifest. Place the
+notebook at `tutorials/<id>/<id>.ipynb` (core) or
+`notebooks_community/<id>/<id>.ipynb` (community), using a lowercase
+snake_case `<id>` that matches the directory and filename. Then register it in
+[`website/tutorials.json`](website/tutorials.json) or
+[`website/notebooks_community.json`](website/notebooks_community.json) with
+`{"id": "<id>", "title": "..."}`; without this entry the notebook is silently
+omitted from the built site. Verify with `./scripts/build_docs.sh`.
 
 ## Pull Requests
 

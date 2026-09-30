@@ -14,8 +14,13 @@ from torch.nn import ModuleDict, ModuleList
 
 
 class IdentityPath(SamplePath):
+    ensemble_as_batch: bool = False
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x
+
+    def set_ensemble_as_batch(self, ensemble_as_batch: bool) -> None:
+        self.ensemble_as_batch = ensemble_as_batch
 
 
 class TestGenericPaths(BotorchTestCase):
@@ -47,6 +52,12 @@ class TestGenericPaths(BotorchTestCase):
         self.assertIsInstance(output, torch.Tensor)
         self.assertEqual(output.shape, (2,) + x.shape)
         self.assertTrue(output.eq(x).all())
+
+        A.set_ensemble_as_batch(True)
+        self.assertTrue(A.ensemble_as_batch)
+
+        A.set_ensemble_as_batch(False)
+        self.assertFalse(A.ensemble_as_batch)
 
         # Test `dict`` methods
         self.assertEqual(len(path_dict), 2)
@@ -94,7 +105,7 @@ class TestGenericPaths(BotorchTestCase):
         self.assertEqual(output.shape, (2,) + x.shape)
         self.assertTrue(output.eq(x).all())
 
-        # Test `list` methods
+        # Test ``list`` methods
         self.assertEqual(len(path_list), 2)
         for key, (path, path_0) in enumerate(zip(path_list, path_list.paths)):
             self.assertEqual(1, len({path, path_0, path_list[key]}))

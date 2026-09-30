@@ -5,16 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import warnings
-
 import torch
-from botorch import settings
 from botorch.acquisition.cost_aware import (
     CostAwareUtility,
     GenericCostAwareUtility,
     InverseCostWeightedUtility,
 )
-from botorch.exceptions.warnings import CostAwareWarning
 from botorch.models.deterministic import GenericDeterministicModel
 from botorch.sampling import IIDNormalSampler
 from botorch.utils.testing import BotorchTestCase, MockModel, MockPosterior
@@ -43,7 +39,7 @@ class TestCostAwareUtilities(BotorchTestCase):
     def test_InverseCostWeightedUtility(self):
         for batch_shape in ([], [2]):
             for dtype in (torch.float, torch.double):
-                # the event shape is `batch_shape x q x t`
+                # the event shape is ``batch_shape x q x t``
                 mean = 1 + torch.rand(
                     *batch_shape, 2, 1, device=self.device, dtype=dtype
                 )
@@ -60,14 +56,29 @@ class TestCostAwareUtilities(BotorchTestCase):
                 with self.assertRaises(RuntimeError):
                     icwu(X, deltas)
 
-                # check warning for negative cost
+                # test ValueError if costs are negative
                 mm = MockModel(MockPosterior(mean=mean.clamp_max(-1e-6)))
                 icwu = InverseCostWeightedUtility(mm)
-                with warnings.catch_warnings(record=True) as ws, settings.debug(True):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    (
+                        "Costs must be strictly positive. "
+                        "Consider clamping cost_objective."
+                    ),
+                ):
                     icwu(X, deltas)
-                    self.assertTrue(
-                        any(issubclass(w.category, CostAwareWarning) for w in ws)
-                    )
+
+                # test ValueError if costs are zero
+                mm = MockModel(MockPosterior(mean=mean.clamp(min=0.0, max=0.0)))
+                icwu = InverseCostWeightedUtility(mm)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    (
+                        "Costs must be strictly positive. "
+                        "Consider clamping cost_objective."
+                    ),
+                ):
+                    icwu(X, deltas)
 
                 # basic test for both positive and negative delta values
                 mm = MockModel(MockPosterior(mean=mean))
@@ -113,21 +124,20 @@ class TestCostAwareUtilities(BotorchTestCase):
                     torch.equal(ratios, deltas / samples.squeeze(-1).sum(dim=-1))
                 )
 
-                # test min cost
+                # test log cost
                 mm = MockModel(MockPosterior(mean=mean))
-                icwu = InverseCostWeightedUtility(mm, min_cost=1.5)
-                ratios = icwu(X, deltas)
-                self.assertTrue(
-                    torch.equal(
-                        ratios, deltas / mean.clamp_min(1.5).squeeze(-1).sum(dim=-1)
-                    )
+                icwu = InverseCostWeightedUtility(mm, log=True)
+                log_ratios = icwu(X, torch.log(deltas))
+
+                self.assertAllClose(
+                    log_ratios.exp(), deltas / mean.squeeze(-1).sum(dim=-1), atol=1e-4
                 )
 
                 # test evaluation_mask
                 multi_output_mean = torch.cat([mean, 2 * mean], dim=-1)
 
-                def cost_fn(X):
-                    return multi_output_mean
+                def cost_fn(X, mom=multi_output_mean):
+                    return mom
 
                 mm = GenericDeterministicModel(f=cost_fn, num_outputs=2)
                 icwu = InverseCostWeightedUtility(mm)
@@ -145,9 +155,6 @@ class TestCostAwareUtilities(BotorchTestCase):
                 )
                 # test eval_mask where not all rows are the same
                 eval_mask[0, 1] = False
-                msg = (
-                    "Currently, all candidates must be evaluated "
-                    "on the same outputs."
-                )
+                msg = "Currently, all candidates must be evaluated on the same outputs."
                 with self.assertRaisesRegex(NotImplementedError, msg):
                     icwu(X, deltas, X_evaluation_mask=eval_mask)

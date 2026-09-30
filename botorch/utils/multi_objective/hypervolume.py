@@ -21,12 +21,11 @@ References
 
 from __future__ import annotations
 
+import random
 import warnings
+from collections.abc import Callable
 from copy import deepcopy
-
 from itertools import combinations
-
-from typing import Callable, List, Optional, Union
 
 import torch
 from botorch.acquisition.cached_cholesky import CachedCholeskyMCSamplerMixin
@@ -57,24 +56,26 @@ from botorch.utils.multi_objective.box_decompositions.utils import (
 )
 from botorch.utils.objective import compute_feasibility_indicator
 from botorch.utils.torch import BufferDict
+from botorch.utils.transforms import is_ensemble, match_batch_shape
 from torch import Tensor
+
 
 MIN_Y_RANGE = 1e-7
 
 
 def infer_reference_point(
     pareto_Y: Tensor,
-    max_ref_point: Optional[Tensor] = None,
+    max_ref_point: Tensor | None = None,
     scale: float = 0.1,
     scale_max_ref_point: bool = False,
 ) -> Tensor:
     r"""Get reference point for hypervolume computations.
 
-    This sets the reference point to be `ref_point = nadir - scale * range`
-    when there is no `pareto_Y` that is better than `max_ref_point`.
-    If there's `pareto_Y` better than `max_ref_point`, the reference point
-    will be set to `max_ref_point - scale * range` if `scale_max_ref_point`
-    is true and to `max_ref_point` otherwise.
+    This sets the reference point to be ``ref_point = nadir - scale * range``
+    when there is no ``pareto_Y`` that is better than ``max_ref_point``.
+    If there's ``pareto_Y`` better than ``max_ref_point``, the reference point
+    will be set to ``max_ref_point - scale * range`` if ``scale_max_ref_point``
+    is true and to ``max_ref_point`` otherwise.
 
     [Ishibuchi2011]_ find 0.1 to be a robust multiplier for scaling the
     nadir point.
@@ -82,18 +83,18 @@ def infer_reference_point(
     Note: this assumes maximization of all objectives.
 
     Args:
-        pareto_Y: A `n x m`-dim tensor of Pareto-optimal points.
-        max_ref_point: A `m` dim tensor indicating the maximum reference point.
-            Some elements can be NaN, except when `pareto_Y` is empty,
+        pareto_Y: A ``n x m``-dim tensor of Pareto-optimal points.
+        max_ref_point: A ``m`` dim tensor indicating the maximum reference point.
+            Some elements can be NaN, except when ``pareto_Y`` is empty,
             in which case these dimensions will be treated as if no
-            `max_ref_point` was provided and set to `nadir - scale * range`.
+            ``max_ref_point`` was provided and set to ``nadir - scale * range``.
         scale: A multiplier used to scale back the reference point based on the
             range of each objective.
         scale_max_ref_point: A boolean indicating whether to apply scaling to
             the max_ref_point based on the range of each objective.
 
     Returns:
-        A `m`-dim tensor containing the reference point.
+        A ``m``-dim tensor containing the reference point.
     """
     if pareto_Y.shape[0] == 0:
         if max_ref_point is None:
@@ -165,7 +166,7 @@ class Hypervolume:
         r"""Initialize hypervolume object.
 
         Args:
-            ref_point: `m`-dim Tensor containing the reference point.
+            ref_point: ``m``-dim Tensor containing the reference point.
 
         """
         self.ref_point = ref_point
@@ -175,7 +176,7 @@ class Hypervolume:
         r"""Get reference point (for maximization).
 
         Returns:
-            A `m`-dim tensor containing the reference point.
+            A ``m``-dim tensor containing the reference point.
         """
         return -self._ref_point
 
@@ -184,7 +185,7 @@ class Hypervolume:
         r"""Set the reference point for maximization
 
         Args:
-            ref_point:  A `m`-dim tensor containing the reference point.
+            ref_point:  A ``m``-dim tensor containing the reference point.
         """
         self._ref_point = -ref_point
 
@@ -192,7 +193,7 @@ class Hypervolume:
         r"""Compute hypervolume.
 
         Args:
-            pareto_Y: A `n x m`-dim tensor of pareto optimal outcomes
+            pareto_Y: A ``n x m``-dim tensor of pareto optimal outcomes
 
         Returns:
             The hypervolume.
@@ -308,7 +309,7 @@ class Hypervolume:
         Note: this assumes minimization.
 
         Args:
-            pareto_Y: A `n x m`-dim tensor of pareto optimal objectives.
+            pareto_Y: A ``n x m``-dim tensor of pareto optimal objectives.
 
         """
         m = pareto_Y.shape[-1]
@@ -322,7 +323,7 @@ class Hypervolume:
             self.list.extend(nodes, i)
 
 
-def sort_by_dimension(nodes: List[Node], i: int) -> None:
+def sort_by_dimension(nodes: list[Node], i: int) -> None:
     r"""Sorts the list of nodes in-place by the specified objective.
 
     Args:
@@ -346,7 +347,7 @@ class Node:
         m: int,
         dtype: torch.dtype,
         device: torch.device,
-        data: Optional[Tensor] = None,
+        data: Tensor | None = None,
     ) -> None:
         r"""Initialize MultiList.
 
@@ -372,7 +373,7 @@ class MultiList:
     """
 
     def __init__(self, m: int, dtype: torch.dtype, device: torch.device) -> None:
-        r"""Initialize `m` doubly linked lists.
+        r"""Initialize ``m`` doubly linked lists.
 
         Args:
             m: number of doubly linked lists
@@ -399,7 +400,7 @@ class MultiList:
         self.sentinel.prev[index] = node
         last.next[index] = node
 
-    def extend(self, nodes: List[Node], index: int) -> None:
+    def extend(self, nodes: list[Node], index: int) -> None:
         r"""Extends the list at the given index with the nodes.
 
         Args:
@@ -416,7 +417,7 @@ class MultiList:
         Args:
             node: The node to remove
             index: The upper bound on the range of indices
-            bounds: A `2 x m`-dim tensor bounds on the objectives
+            bounds: A ``2 x m``-dim tensor bounds on the objectives
         """
         for i in range(index):
             predecessor = node.prev[i]
@@ -436,7 +437,7 @@ class MultiList:
         Args:
             node: The node
             index: The upper bound on the range of indices
-            bounds: A `2 x m`-dim tensor bounds on the objectives
+            bounds: A ``2 x m``-dim tensor bounds on the objectives
 
         """
         for i in range(index):
@@ -456,10 +457,11 @@ class SubsetIndexCachingMixin:
     def compute_q_subset_indices(
         self, q_out: int, device: torch.device
     ) -> BufferDict[str, Tensor]:
-        r"""Returns and caches a dict of indices equal to subsets of `{1, ..., q_out}`.
+        r"""Returns and caches a dict of indices equal to subsets of
+        ``{1, ..., q_out}``.
 
-        This means that consecutive calls to `self.compute_q_subset_indices` with
-        the same `q_out` do not recompute the indices for all (2^q_out - 1) subsets.
+        This means that consecutive calls to ``self.compute_q_subset_indices`` with
+        the same ``q_out`` do not recompute the indices for all (2^q_out - 1) subsets.
 
         NOTE: This will use more memory than regenerating the indices
         for each i and then deleting them, but it will be faster for
@@ -467,14 +469,14 @@ class SubsetIndexCachingMixin:
 
         Args:
             q_out: The batch size of the objectives. This is typically equal
-                to the q-batch size of `X`. However, if using a set valued
-                objective (e.g., MVaR) that produces `s` objective values for
-                each point on the q-batch of `X`, we need to properly account
+                to the q-batch size of ``X``. However, if using a set valued
+                objective (e.g., MVaR) that produces ``s`` objective values for
+                each point on the q-batch of ``X``, we need to properly account
                 for each objective while calculating the hypervolume contributions
-                by using `q_out = q * s`.
+                by using ``q_out = q * s``.
 
         Returns:
-            A dict that maps "q choose i" to all size-i subsets of `{1, ..., q_out}`.
+            A dict that maps "q choose i" to all size-i subsets of ``{1, ..., q_out}``.
         """
         if q_out != self.q_out:
             self.q_subset_indices = compute_subset_indices(q_out, device=device)
@@ -483,15 +485,15 @@ class SubsetIndexCachingMixin:
 
 
 def compute_subset_indices(
-    q: int, device: Optional[torch.device] = None
+    q: int, device: torch.device | None = None
 ) -> BufferDict[str, Tensor]:
-    r"""Compute all (2^q - 1) distinct subsets of {1, ..., `q`}.
+    r"""Compute all (2^q - 1) distinct subsets of {1, ..., ``q``}.
 
     Args:
-        q: An integer defininig the set {1, ..., `q`} whose subsets to compute.
+        q: An integer defininig the set {1, ..., ``q``} whose subsets to compute.
 
     Returns:
-        A dict that maps "q choose i" to all size-i subsets of {1, ..., `q_out`}.
+        A dict that maps "q choose i" to all size-i subsets of {1, ..., ``q_out``}.
     """
     indices = torch.arange(q, dtype=torch.long, device=device)
     return BufferDict(
@@ -508,19 +510,19 @@ class NoisyExpectedHypervolumeMixin(CachedCholeskyMCSamplerMixin):
     def __init__(
         self,
         model: Model,
-        ref_point: Union[List[float], Tensor],
+        ref_point: list[float] | Tensor,
         X_baseline: Tensor,
-        sampler: Optional[MCSampler] = None,
-        objective: Optional[MCMultiOutputObjective] = None,
-        constraints: Optional[List[Callable[[Tensor], Tensor]]] = None,
-        X_pending: Optional[Tensor] = None,
+        sampler: MCSampler | None = None,
+        objective: MCMultiOutputObjective | None = None,
+        constraints: list[Callable[[Tensor], Tensor]] | None = None,
+        X_pending: Tensor | None = None,
         prune_baseline: bool = False,
         alpha: float = 0.0,
         cache_pending: bool = True,
         max_iep: int = 0,
         incremental_nehvi: bool = True,
-        cache_root: bool = True,
-        marginalize_dim: Optional[int] = None,
+        cache_root: bool | None = None,
+        marginalize_dim: int | None = None,
     ):
         """Initialize a mixin that contains functions for the batched Pareto-frontier
         partitioning used by the noisy hypervolume-improvement-based acquisition
@@ -528,48 +530,48 @@ class NoisyExpectedHypervolumeMixin(CachedCholeskyMCSamplerMixin):
 
         Args:
             model: A fitted model.
-            ref_point: A list or tensor with `m` elements representing the reference
+            ref_point: A list or tensor with ``m`` elements representing the reference
                 point (in the outcome space) w.r.t. to which compute the hypervolume.
                 This is a reference point for the objective values (i.e. after
-                applying `objective` to the samples).
-            X_baseline: A `r x d`-dim Tensor of `r` design points that have already
+                applying ``objective`` to the samples).
+            X_baseline: A ``r x d``-dim Tensor of ``r`` design points that have already
                 been observed. These points are considered as potential approximate
                 pareto-optimal design points.
             sampler: The sampler used to draw base samples. If not given,
-                a sampler is generated using `get_sampler`. NOTE: A box decomposition is
+                a sampler is generated using ``get_sampler``. NOTE: A box decomposition
                 of the Pareto front is created for each MC sample, an operation that
-                scales as `O(n^m)` and thus becomes particularly costly for `m` > 2.
+                scales as ``O(n^m)`` and thus becomes particularly costly for ``m`` > 2.
             objective: The MCMultiOutputObjective under which the samples are
-                evaluated. Defaults to `IdentityMCMultiOutputObjective()`.
+                evaluated. Defaults to ``IdentityMCMultiOutputObjective()``.
             constraints: A list of callables, each mapping a Tensor of dimension
-                `sample_shape x batch-shape x q x m` to a Tensor of dimension
-                `sample_shape x batch-shape x q`, where negative values imply
-                feasibility. The acqusition function will compute expected feasible
+                ``sample_shape x batch-shape x q x m`` to a Tensor of dimension
+                ``sample_shape x batch-shape x q``, where negative values imply
+                feasibility. The acquisition function will compute expected feasible
                 hypervolume.
-            X_pending: A `batch_shape x m x d`-dim Tensor of `m` design points that
-                have points that have been submitted for function evaluation, but
+            X_pending: A ``batch_shape x m x d``-dim Tensor of ``m`` design points
+                that have been submitted for function evaluation, but
                 have not yet been evaluated.
-            prune_baseline: If True, remove points in `X_baseline` that are
+            prune_baseline: If True, remove points in ``X_baseline`` that are
                 highly unlikely to be the pareto optimal and better than the
                 reference point. This can significantly improve computation time and
                 is generally recommended. In order to customize pruning parameters,
-                instead manually call `prune_inferior_points_multi_objective` on
-                `X_baseline` before instantiating the acquisition function.
+                instead manually call ``prune_inferior_points_multi_objective`` on
+                ``X_baseline`` before instantiating the acquisition function.
             alpha: The hyperparameter controlling the approximate non-dominated
                 partitioning. The default value of 0.0 means an exact partitioning
-                is used. As the number of objectives `m` increases, consider increasing
-                this parameter in order to limit computational complexity.
+                is used. As the number of objectives ``m`` increases, consider
+                increasing this parameter in order to limit computational complexity.
             cache_pending: A boolean indicating whether to use cached box
                 decompositions (CBD) for handling pending points. This is
                 generally recommended.
             max_iep: The maximum number of pending points before the box
                 decompositions will be recomputed.
             incremental_nehvi: A boolean indicating whether to compute the
-                incremental NEHVI from the `i`th point where `i=1, ..., q`
+                incremental NEHVI from the ``i``th point where ``i=1, ..., q``
                 under sequential greedy optimization, or the full qNEHVI over
-                `q` points.
+                ``q`` points.
             cache_root: A boolean indicating whether to cache the root
-                decomposition over `X_baseline` and use low-rank updates.
+                decomposition over ``X_baseline`` and use low-rank updates.
             marginalize_dim: A batch dimension that should be marginalized. For example,
                 this is useful when using a batched fully Bayesian model.
         """
@@ -651,13 +653,13 @@ class NoisyExpectedHypervolumeMixin(CachedCholeskyMCSamplerMixin):
         r"""Return X_baseline augmented with pending points cached using CBD."""
         return self._X_baseline_and_pending
 
-    def _compute_initial_hvs(self, obj: Tensor, feas: Optional[Tensor] = None) -> None:
+    def _compute_initial_hvs(self, obj: Tensor, feas: Tensor | None = None) -> None:
         r"""Compute hypervolume dominated by f(X_baseline) under each sample.
 
         Args:
-            obj: A `sample_shape x batch_shape x n x m`-dim tensor of samples
+            obj: A ``(sample_shape * batch_shape) x n x m``-dim tensor of samples
                 of objectives.
-            feas: `sample_shape x batch_shape x n`-dim tensor of samples
+            feas: ``(sample_shape * batch_shape) x n``-dim tensor of samples
                 of feasibility indicators.
         """
         initial_hvs = []
@@ -673,7 +675,7 @@ class NoisyExpectedHypervolumeMixin(CachedCholeskyMCSamplerMixin):
         self.register_buffer(
             "_initial_hvs",
             torch.tensor(initial_hvs, dtype=obj.dtype, device=obj.device).view(
-                self._batch_sample_shape, *obj.shape[-2:]
+                self._batch_sample_shape
             ),
         )
 
@@ -703,8 +705,8 @@ class NoisyExpectedHypervolumeMixin(CachedCholeskyMCSamplerMixin):
             if self._cache_root:
                 # Note that this implicitly uses LinearOperator's caching to check if
                 # the proper root decomposition has already been cached to
-                # `posterior.mvn.lazy_covariance_matrix`, which it may have been in
-                # the call to `self.base_sampler`, and computes it if not found
+                # ``posterior.mvn.lazy_covariance_matrix``, which it may have been in
+                # the call to ``self.base_sampler``, and computes it if not found
                 self._baseline_L = self._compute_root_decomposition(posterior=posterior)
             obj = self.objective(samples, X=self.X_baseline)
 
@@ -775,11 +777,11 @@ class NoisyExpectedHypervolumeMixin(CachedCholeskyMCSamplerMixin):
         self.register_buffer("cell_lower_bounds", cell_bounds[0])
         self.register_buffer("cell_upper_bounds", cell_bounds[1])
 
-    def set_X_pending(self, X_pending: Optional[Tensor] = None) -> None:
+    def set_X_pending(self, X_pending: Tensor | None = None) -> None:
         r"""Informs the acquisition function about pending design points.
 
         Args:
-            X_pending: `n x d` Tensor with `n` `d`-dim design points that have
+            X_pending: ``n x d`` Tensor with ``n`` ``d``-dim design points that have
                 been submitted for evaluation but have not yet been evaluated.
         """
         if X_pending is None:
@@ -790,8 +792,9 @@ class NoisyExpectedHypervolumeMixin(CachedCholeskyMCSamplerMixin):
                     "Pending points require a gradient but the acquisition function"
                     " will not provide a gradient to these points.",
                     BotorchWarning,
+                    stacklevel=2,
                 )
-            X_pending = X_pending.detach().clone()
+            self.X_pending = X_pending.detach().clone()
             if self.cache_pending:
                 X_baseline = torch.cat([self._X_baseline, X_pending], dim=-2)
                 # Number of new points is the total number of points minus
@@ -810,26 +813,126 @@ class NoisyExpectedHypervolumeMixin(CachedCholeskyMCSamplerMixin):
                                 .clamp_min(0.0)
                                 .mean()
                             )
-                        # Set to None so that pending points are not concatenated in
-                        # forward.
-                        self.X_pending = None
                         # Set q_in=-1 to so that self.sampler is updated at the next
                         # forward call.
                         self.q_in = -1
-                    else:
-                        self.X_pending = X_pending[-num_new_points:]
-            else:
-                self.X_pending = X_pending
 
     @property
     def _hypervolumes(self) -> Tensor:
         r"""Compute hypervolume over X_baseline under each posterior sample.
 
         Returns:
-            A `sample_shape`-dim tensor of hypervolumes.
+            A ``sample_shape``-dim tensor of hypervolumes.
         """
         return (
             self.partitioning.compute_hypervolume()
             .to(self.ref_point)  # for m > 2, the partitioning is on the CPU
             .view(self._batch_sample_shape)
         )
+
+    def _compute_posterior_samples_and_concat_pending(
+        self, X: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        r"""Get samples from the posterior, and concatenate uncached pending points.
+
+        Args:
+            X: ``batch_shape x q x d`` X Tensor passed into the ``forward`` method of
+                an acqf
+
+        Returns:
+            A tuple containing samples of the latent function from the posterior, and
+            the ``batch_shape x (q + num_uncached_pending) x d`` X tensor including any
+            pending observations that have not been cached.
+        """
+        # Manually concatenate pending points only if:
+        # - pending points are not cached, or
+        # - number of pending points is less than max_iep
+        if self.X_pending is not None:
+            num_pending = self.X_pending.shape[-2]
+            num_X_baseline = self._X_baseline.shape[-2]
+            num_X_baseline_and_cached_pending = self.X_baseline.shape[-2]
+            num_uncached_pending = (
+                (num_pending + num_X_baseline - num_X_baseline_and_cached_pending)
+                if self.cache_pending
+                else num_pending
+            )
+            X_pending_uncached = self.X_pending[
+                ..., num_pending - num_uncached_pending :, :
+            ]
+            X = torch.cat([X, match_batch_shape(X_pending_uncached, X)], dim=-2)
+        X_full = torch.cat([match_batch_shape(self.X_baseline, X), X], dim=-2)
+        # NOTE: To ensure that we correctly sample ``f(X)`` from the joint distribution
+        # ``f((X_baseline, X)) ~ P(f | D)``, it is critical to compute the joint
+        # posterior over X *and* X_baseline -- which also contains pending points
+        # whenever there are any --  since the baseline and pending values
+        # ``f(X_baseline)`` are generally pre-computed and cached before the
+        # ``forward`` call, see the docs of
+        # ``cache_pending`` for details.
+        # TODO: Improve the efficiency by not re-computing the X_baseline-X_baseline
+        # covariance matrix, but only the covariance of
+        # 1) X and X, and
+        # 2) X and X_baseline.
+        posterior = self.model.posterior(X_full)
+        # Account for possible one-to-many transform and the MCMC batch dimension in
+        # ``SaasFullyBayesianSingleTaskGP``
+        event_shape_lag = 1 if is_ensemble(self.model) else 2
+        n_w = (
+            posterior._extended_shape()[X_full.dim() - event_shape_lag]
+            // X_full.shape[-2]
+        )
+        q_in = X.shape[-2] * n_w
+        self._set_sampler(q_in=q_in, posterior=posterior)
+        return self._get_f_X_samples(posterior=posterior, q_in=q_in), X
+
+
+def get_hypervolume_maximizing_subset(
+    n: int, Y: Tensor, ref_point: Tensor
+) -> tuple[Tensor, Tensor]:
+    """Find an approximately hypervolume-maximizing subset of size ``n``.
+
+    This greedily selects points from Y to maximize the hypervolume of
+    the subset sequentially. This has bounded error since hypervolume is
+    submodular.
+
+    Args:
+        n: The size of the subset to return.
+        Y: A ``n' x m``-dim tensor of outcomes.
+        ref_point: A ``m``-dim tensor containing the reference point.
+
+    Returns:
+        A two-element tuple containing
+            - A ``n x m``-dim tensor of outcomes.
+            - A ``n``-dim tensor of indices of the outcomes in the original set.
+    """
+    if Y.ndim != 2:
+        raise NotImplementedError(
+            "Only two dimensions are supported (no additional) batch dims."
+        )
+    elif Y.shape[0] < n:
+        raise ValueError(
+            f"Y has fewer points ({Y.shape[0]}) than the requested subset size ({n})."
+        )
+    Y_subset = torch.zeros(0, Y.shape[1], dtype=Y.dtype, device=Y.device)
+    selected_indices = []
+    remaining_idcs = set(range(Y.shape[0]))
+    best_hv = 0.0
+    for _ in range(n):
+        # Add each point and compute the hypervolume
+        best_idx = None
+        for i in remaining_idcs:
+            partitioning = DominatedPartitioning(
+                ref_point=ref_point, Y=torch.cat((Y_subset, Y[i : i + 1]), dim=0)
+            )
+            hv = partitioning.compute_hypervolume().item()
+            if hv > best_hv:
+                best_idx = i
+                best_hv = hv
+        if best_idx is None:
+            # no arm improved HV, so select a random arm. This will only happen if Y is
+            # not a Pareto frontier, where all points are better than the reference
+            # point
+            best_idx = random.choice(list(remaining_idcs))
+        remaining_idcs.remove(best_idx)
+        selected_indices.append(best_idx)
+        Y_subset = torch.cat((Y_subset, Y[best_idx : best_idx + 1]), dim=0)
+    return Y_subset, torch.tensor(selected_indices, dtype=torch.long, device=Y.device)

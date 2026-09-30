@@ -64,7 +64,6 @@ class TestGetters(BotorchTestCase):
                     train_X=train_X,
                     train_Y=train_Y[:, :num_outputs],
                     input_transform=Normalize(d=2),
-                    outcome_transform=Standardize(m=num_outputs),
                 )
             )
 
@@ -106,8 +105,9 @@ class TestGetters(BotorchTestCase):
             model.eval()
             self.assertTrue(X.equal(get_train_inputs(model, transformed=False)[0]))
             self.assertTrue(Z.equal(get_train_inputs(model, transformed=True)[0]))
-            with delattr_ctx(model, "input_transform"), patch.object(
-                model, "_original_train_inputs", new=None
+            with (
+                delattr_ctx(model, "input_transform"),
+                patch.object(model, "_original_train_inputs", new=None),
             ):
                 self.assertTrue(Z.equal(get_train_inputs(model, transformed=False)[0]))
                 self.assertTrue(Z.equal(get_train_inputs(model, transformed=True)[0]))

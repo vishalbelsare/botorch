@@ -8,19 +8,20 @@ r"""Representations for different kinds of datasets."""
 
 from __future__ import annotations
 
-import warnings
-from typing import Any, Dict, List, Optional, Union
+import copy
+from typing import Any
 
 import torch
 from botorch.exceptions.errors import InputDataError, UnsupportedError
 from botorch.utils.containers import BotorchContainer, SliceContainer
+from pyre_extensions import none_throws
 from torch import long, ones, Tensor
 
 
 class SupervisedDataset:
-    r"""Base class for datasets consisting of labelled pairs `(X, Y)`
-    and an optional `Yvar` that stipulates observations variances so
-    that `Y[i] ~ N(f(X[i]), Yvar[i])`.
+    r"""Base class for datasets consisting of labelled pairs ``(X, Y)``
+    and an optional ``Yvar`` that stipulates observations variances so
+    that ``Y[i] ~ N(f(X[i]), Yvar[i])``.
 
     Example:
 
@@ -47,30 +48,37 @@ class SupervisedDataset:
 
     def __init__(
         self,
-        X: Union[BotorchContainer, Tensor],
-        Y: Union[BotorchContainer, Tensor],
+        X: BotorchContainer | Tensor,
+        Y: BotorchContainer | Tensor,
         *,
-        feature_names: List[str],
-        outcome_names: List[str],
-        Yvar: Union[BotorchContainer, Tensor, None] = None,
+        feature_names: list[str],
+        outcome_names: list[str],
+        Yvar: BotorchContainer | Tensor | None = None,
         validate_init: bool = True,
+        group_indices: Tensor | None = None,
     ) -> None:
-        r"""Constructs a `SupervisedDataset`.
+        r"""Constructs a ``SupervisedDataset``.
 
         Args:
-            X: A `Tensor` or `BotorchContainer` representing the input features.
-            Y: A `Tensor` or `BotorchContainer` representing the outcomes.
-            feature_names: A list of names of the features in `X`.
-            outcome_names: A list of names of the outcomes in `Y`.
-            Yvar: An optional `Tensor` or `BotorchContainer` representing
+            X: A ``Tensor`` or ``BotorchContainer`` representing the input features.
+            Y: A ``Tensor`` or ``BotorchContainer`` representing the outcomes.
+            feature_names: A list of names of the features in ``X``.
+            outcome_names: A list of names of the outcomes in ``Y``.
+            Yvar: An optional ``Tensor`` or ``BotorchContainer`` representing
                 the observation noise.
-            validate_init: If `True`, validates the input shapes.
+            validate_init: If ``True``, validates the input shapes.
+            group_indices: A ``Tensor`` representing the which rows of X and Y are
+                grouped together. This is used to support applications in which multiple
+                observations should be considered as a group, e.g., learning-curve-based
+                modeling. If provided, its shape must be compatible with X and Y.
         """
         self._X = X
         self._Y = Y
         self._Yvar = Yvar
-        self.feature_names = feature_names
-        self.outcome_names = outcome_names
+        self.feature_names = feature_names.copy()
+        self.outcome_names = outcome_names.copy()
+        self.group_indices = group_indices
+        self.validate_init = validate_init
         if validate_init:
             self._validate()
 
@@ -87,7 +95,7 @@ class SupervisedDataset:
         return self._Y()
 
     @property
-    def Yvar(self) -> Optional[Tensor]:
+    def Yvar(self) -> Tensor | None:
         if self._Yvar is None or isinstance(self._Yvar, Tensor):
             return self._Yvar
         return self._Yvar()
@@ -96,18 +104,21 @@ class SupervisedDataset:
         self,
         validate_feature_names: bool = True,
         validate_outcome_names: bool = True,
+        validate_group_indices: bool = True,
     ) -> None:
         r"""Checks that the shapes of the inputs are compatible with each other.
 
         Args:
             validate_feature_names: By default, we validate that the length of
-                `feature_names` matches the # of columns of `self.X`. If a
-                particular dataset, e.g., `RankingDataset`, is known to violate
-                this assumption, this can be set to `False`.
+                ``feature_names`` matches the # of columns of ``self.X``. If a
+                particular dataset, e.g., ``RankingDataset``, is known to violate
+                this assumption, this can be set to ``False``.
             validate_outcome_names: By default, we validate that the length of
-                `outcomes_names` matches the # of columns of `self.Y`. If a
-                particular dataset, e.g., `RankingDataset`, is known to violate
-                this assumption, this can be set to `False`.
+                ``outcomes_names`` matches the # of columns of ``self.Y``. If a
+                particular dataset, e.g., ``RankingDataset``, is known to violate
+                this assumption, this can be set to ``False``.
+            validate_group_indices: By default, we validate that the shape of
+                ``group_indices`` matches the shape of X and Y.
         """
         shape_X = self.X.shape
         if isinstance(self._X, BotorchContainer):
@@ -133,8 +144,20 @@ class SupervisedDataset:
                 "`Y` must have the same number of columns as the number of "
                 "outcomes in `outcome_names`."
             )
+        if validate_group_indices and self.group_indices is not None:
+            if self.group_indices.shape != shape_X:
+                raise ValueError(
+                    f"shape_X ({shape_X}) must have the same shape as "
+                    f"group_indices ({none_throws(self.group_indices).shape})."
+                )
 
     def __eq__(self, other: Any) -> bool:
+        if self.group_indices is None and other.group_indices is None:
+            group_indices_equal = True
+        elif self.group_indices is None or other.group_indices is None:
+            group_indices_equal = False
+        else:
+            group_indices_equal = torch.equal(self.group_indices, other.group_indices)
         return (
             type(other) is type(self)
             and torch.equal(self.X, other.X)
@@ -146,50 +169,64 @@ class SupervisedDataset:
             )
             and self.feature_names == other.feature_names
             and self.outcome_names == other.outcome_names
+            and group_indices_equal
         )
 
+    def clone(
+        self, deepcopy: bool = False, mask: Tensor | None = None
+    ) -> SupervisedDataset:
+        """Return a copy of the dataset.
 
-class FixedNoiseDataset(SupervisedDataset):
-    r"""A SupervisedDataset with an additional field `Yvar` that stipulates
-    observations variances so that `Y[i] ~ N(f(X[i]), Yvar[i])`.
+        Args:
+            deepcopy: If True, perform a deep copy. Otherwise, use the same
+                tensors/lists.
+            mask: A ``n``-dim boolean mask indicating which rows to keep. This is used
+                along the -2 dimension.
 
-    NOTE: This is deprecated. Use `SupervisedDataset` instead.
-    Will be removed in a future release (~v0.11).
-    """
-
-    def __init__(
-        self,
-        X: Union[BotorchContainer, Tensor],
-        Y: Union[BotorchContainer, Tensor],
-        Yvar: Union[BotorchContainer, Tensor],
-        feature_names: List[str],
-        outcome_names: List[str],
-        validate_init: bool = True,
-    ) -> None:
-        r"""Initialize a `FixedNoiseDataset` -- deprecated!"""
-        warnings.warn(
-            "`FixedNoiseDataset` is deprecated. Use `SupervisedDataset` instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        super().__init__(
-            X=X,
-            Y=Y,
+        Returns:
+            The new dataset.
+        """
+        new_X = self._X
+        new_Y = self._Y
+        new_Yvar = self._Yvar
+        feature_names = self.feature_names
+        outcome_names = self.outcome_names
+        if mask is not None:
+            if any(isinstance(x, BotorchContainer) for x in [new_X, new_Y, new_Yvar]):
+                raise NotImplementedError(
+                    "Masking is not supported for BotorchContainers."
+                )
+            new_X = new_X[..., mask, :]
+            new_Y = new_Y[..., mask, :]
+            if new_Yvar is not None:
+                new_Yvar = new_Yvar[..., mask, :]
+        if deepcopy:
+            new_X = new_X.clone()
+            new_Y = new_Y.clone()
+            new_Yvar = new_Yvar.clone() if new_Yvar is not None else None
+            feature_names = copy.copy(self.feature_names)
+            outcome_names = copy.copy(self.outcome_names)
+        kwargs = {}
+        if new_Yvar is not None:
+            kwargs = {"Yvar": new_Yvar}
+        return type(self)(
+            X=new_X,
+            Y=new_Y,
             feature_names=feature_names,
             outcome_names=outcome_names,
-            Yvar=Yvar,
-            validate_init=validate_init,
+            validate_init=self.validate_init,
+            **kwargs,
         )
 
 
 class RankingDataset(SupervisedDataset):
-    r"""A SupervisedDataset whose labelled pairs `(x, y)` consist of m-ary combinations
-    `x ∈ Z^{m}` of elements from a ground set `Z = (z_1, ...)` and ranking vectors
-    `y {0, ..., m - 1}^{m}` with properties:
+    r"""A SupervisedDataset whose labelled pairs ``(x, y)`` consist of m-ary
+    combinations ``x ∈ Z^{m}`` of elements from a ground set ``Z = (z_1, ...)``
+    and ranking vectors ``y {0, ..., m - 1}^{m}`` with properties:
 
         a) Ranks start at zero, i.e. min(y) = 0.
         b) Sorted ranks are contiguous unless one or more ties are present.
-        c) `k` ranks are skipped after a `k`-way tie.
+        c) ``k`` ranks are skipped after a ``k``-way tie.
 
     Example:
 
@@ -217,19 +254,19 @@ class RankingDataset(SupervisedDataset):
     def __init__(
         self,
         X: SliceContainer,
-        Y: Union[BotorchContainer, Tensor],
-        feature_names: List[str],
-        outcome_names: List[str],
+        Y: BotorchContainer | Tensor,
+        feature_names: list[str],
+        outcome_names: list[str],
         validate_init: bool = True,
     ) -> None:
-        r"""Construct a `RankingDataset`.
+        r"""Construct a ``RankingDataset``.
 
         Args:
-            X: A `SliceContainer` representing the input features being ranked.
-            Y: A `Tensor` or `BotorchContainer` representing the rankings.
+            X: A ``SliceContainer`` representing the input features being ranked.
+            Y: A ``Tensor`` or ``BotorchContainer`` representing the rankings.
             feature_names: A list of names of the features in X.
             outcome_names: A list of names of the outcomes in Y.
-            validate_init: If `True`, validates the input shapes.
+            validate_init: If ``True``, validates the input shapes.
         """
         super().__init__(
             X=X,
@@ -241,7 +278,11 @@ class RankingDataset(SupervisedDataset):
         )
 
     def _validate(self) -> None:
-        super()._validate(validate_feature_names=False, validate_outcome_names=False)
+        super()._validate(
+            validate_feature_names=False,
+            validate_outcome_names=False,
+            validate_group_indices=False,
+        )
         if len(self.feature_names) != self._X.values.shape[-1]:
             raise ValueError(
                 "The `values` field of `X` must have the same number of columns as "
@@ -278,20 +319,20 @@ class RankingDataset(SupervisedDataset):
 class MultiTaskDataset(SupervisedDataset):
     """This is a multi-task dataset that is constructed from the datasets of
     individual tasks. It offers functionality to combine parts of individual
-    datasets to construct the inputs necessary for the `MultiTaskGP` models.
+    datasets to construct the inputs necessary for the ``MultiTaskGP`` models.
 
     The datasets of individual tasks are allowed to represent different sets
     of features. When there are heterogeneous feature sets, calling
-    `MultiTaskDataset.X` will result in an error.
+    ``MultiTaskDataset.X`` will result in an error.
     """
 
     def __init__(
         self,
-        datasets: List[SupervisedDataset],
+        datasets: list[SupervisedDataset],
         target_outcome_name: str,
-        task_feature_index: Optional[int] = None,
+        task_feature_index: int | None = None,
     ):
-        """Construct a `MultiTaskDataset`.
+        """Construct a ``MultiTaskDataset``.
 
         Args:
             datasets: A list of the datasets of individual tasks. Each dataset
@@ -303,19 +344,20 @@ class MultiTaskDataset(SupervisedDataset):
                 If given, we sanity-check that the names of the task features
                 match between all datasets.
         """
-        self.datasets: Dict[str, SupervisedDataset] = {
+        self.datasets: dict[str, SupervisedDataset] = {
             ds.outcome_names[0]: ds for ds in datasets
         }
         self.target_outcome_name = target_outcome_name
         self.task_feature_index = task_feature_index
         self._validate_datasets(datasets=datasets)
-        self.feature_names = self.datasets[target_outcome_name].feature_names
+        self.feature_names = self.datasets[target_outcome_name].feature_names.copy()
         self.outcome_names = [target_outcome_name]
 
         # Check if the datasets have identical feature sets.
         self.has_heterogeneous_features = any(
             datasets[0].feature_names != ds.feature_names for ds in datasets[1:]
         )
+        self.group_indices = None
 
     @classmethod
     def from_joint_dataset(
@@ -323,30 +365,30 @@ class MultiTaskDataset(SupervisedDataset):
         dataset: SupervisedDataset,
         task_feature_index: int,
         target_task_value: int,
-        outcome_names_per_task: Optional[Dict[int, str]] = None,
+        outcome_names_per_task: dict[int, str] | None = None,
     ) -> MultiTaskDataset:
-        r"""Construct a `MultiTaskDataset` from a joint dataset that includes the
+        r"""Construct a ``MultiTaskDataset`` from a joint dataset that includes the
         data for all tasks with the task feature index.
 
         This will break down the joint dataset into individual datasets by the value
         of the task feature. Each resulting dataset will have its outcome name set
-        based on `outcome_names_per_task`, with the missing values defaulting to
-        `task_<task_feature>` (except for the target task, which will retain the
+        based on ``outcome_names_per_task``, with the missing values defaulting to
+        ``task_<task_feature>`` (except for the target task, which will retain the
         original outcome name from the dataset).
 
         Args:
             dataset: The joint dataset.
-            task_feature_index: The column index of the task feature in `dataset.X`.
+            task_feature_index: The column index of the task feature in ``dataset.X``.
             target_task_value: The value of the task feature for the target task
                 in the dataset. The data for the target task is filtered according to
-                `dataset.X[task_feature_index] == target_task_value`.
+                ``dataset.X[task_feature_index] == target_task_value``.
             outcome_names_per_task: Optional dictionary mapping task feature values
                 to the outcome names for each task. If not provided, the auxiliary
-                tasks will be named `task_<task_feature>` and the target task will
+                tasks will be named ``task_<task_feature>`` and the target task will
                 retain the outcome name from the dataset.
 
         Returns:
-            A `MultiTaskDataset` instance.
+            A ``MultiTaskDataset`` instance.
         """
         if len(dataset.outcome_names) > 1:
             raise UnsupportedError(
@@ -373,7 +415,7 @@ class MultiTaskDataset(SupervisedDataset):
                 outcome_names=[outcome_name],
             )
             datasets.append(new_dataset)
-        # Return the new
+        # Return the new dataset
         return cls(
             datasets=datasets,
             target_outcome_name=outcome_names_per_task.get(
@@ -382,7 +424,7 @@ class MultiTaskDataset(SupervisedDataset):
             task_feature_index=task_feature_index,
         )
 
-    def _validate_datasets(self, datasets: List[SupervisedDataset]) -> None:
+    def _validate_datasets(self, datasets: list[SupervisedDataset]) -> None:
         """Validates that:
         * Each dataset models only one outcome;
         * Each outcome is modeled by only one dataset;
@@ -430,7 +472,7 @@ class MultiTaskDataset(SupervisedDataset):
     @property
     def X(self) -> Tensor:
         """Appends task features, if needed, and concatenates the Xs of datasets to
-        produce the `train_X` expected by `MultiTaskGP` and subclasses.
+        produce the ``train_X`` expected by ``MultiTaskGP`` and subclasses.
 
         If appending the task features, 0 is reserved for the target task and the
         remaining tasks are populated with 1, 2, ..., len(datasets) - 1.
@@ -461,7 +503,7 @@ class MultiTaskDataset(SupervisedDataset):
         return torch.cat([ds.Y for ds in self.datasets.values()], dim=0)
 
     @property
-    def Yvar(self) -> Optional[Tensor]:
+    def Yvar(self) -> Tensor | None:
         """Concatenates Yvars of the datasets if they exist."""
         all_Yvars = [ds.Yvar for ds in self.datasets.values()]
         return None if all_Yvars[0] is None else torch.cat(all_Yvars, dim=0)
@@ -469,7 +511,7 @@ class MultiTaskDataset(SupervisedDataset):
     def get_dataset_without_task_feature(self, outcome_name: str) -> SupervisedDataset:
         """A helper for extracting the child datasets with their task features removed.
 
-        If the task feature index is `None`, the dataset will be returned as is.
+        If the task feature index is ``None``, the dataset will be returned as is.
 
         Args:
             outcome_name: The outcome name for the dataset to extract.
@@ -492,6 +534,85 @@ class MultiTaskDataset(SupervisedDataset):
             outcome_names=[outcome_name],
         )
 
+    def __eq__(self, other: Any) -> bool:
+        return (
+            type(other) is type(self)
+            and self.datasets == other.datasets
+            and self.target_outcome_name == other.target_outcome_name
+            and self.task_feature_index == other.task_feature_index
+        )
+
+    def get_heterogeneous_feature_mapping(
+        self,
+    ) -> tuple[list["SupervisedDataset"], list[list[int]], int]:
+        """Compute canonical feature ordering for heterogeneous datasets.
+
+        Target features come first (preserving order), then source-only
+        features are appended. The task column (at ``task_feature_index``)
+        is excluded from the mapping.
+
+        Returns:
+            A 3-tuple of:
+            - Ordered datasets (target first, then sources).
+            - Feature indices mapping each dataset's non-task features
+              to the canonical ordering.
+            - Full feature dimensionality (number of unique non-task features).
+
+        Raises:
+            NotImplementedError: If ``task_feature_index`` is not ``-1``.
+        """
+        if self.task_feature_index != -1:
+            raise NotImplementedError(
+                "Heterogeneous feature mapping requires `task_feature_index` to be -1."
+            )
+        child_datasets = self.datasets.copy()
+        target_dataset = child_datasets.pop(self.target_outcome_name)
+        all_datasets = [target_dataset] + list(child_datasets.values())
+
+        # Target's feature order is canonical; source-only features appended.
+        all_features: list[str] = list(target_dataset.feature_names[:-1])
+        for ds in all_datasets[1:]:
+            for fn in ds.feature_names[:-1]:
+                if fn not in all_features:
+                    all_features.append(fn)
+
+        feature_indices = [
+            [all_features.index(fn) for fn in ds.feature_names[:-1]]
+            for ds in all_datasets
+        ]
+        return all_datasets, feature_indices, len(all_features)
+
+    def clone(
+        self, deepcopy: bool = False, mask: Tensor | None = None
+    ) -> MultiTaskDataset:
+        """Return a copy of the dataset.
+
+        Args:
+            deepcopy: If True, perform a deep copy. Otherwise, use the same
+                tensors/lists/datasets.
+            mask: A ``n``-dim boolean mask indicating which rows to keep from the target
+                dataset. This is used along the -2 dimension.
+
+        Returns:
+            The new dataset.
+        """
+        datasets = list(self.datasets.values())
+        if mask is not None or deepcopy:
+            new_datasets = []
+            for outcome, ds in self.datasets.items():
+                new_datasets.append(
+                    ds.clone(
+                        deepcopy=deepcopy,
+                        mask=mask if outcome == self.target_outcome_name else None,
+                    )
+                )
+            datasets = new_datasets
+        return MultiTaskDataset(
+            datasets=datasets,
+            target_outcome_name=self.target_outcome_name,
+            task_feature_index=self.task_feature_index,
+        )
+
 
 class ContextualDataset(SupervisedDataset):
     """This is a contextual dataset that is constructed from either a single
@@ -501,11 +622,11 @@ class ContextualDataset(SupervisedDataset):
 
     def __init__(
         self,
-        datasets: List[SupervisedDataset],
-        parameter_decomposition: Dict[str, List[str]],
-        metric_decomposition: Optional[Dict[str, List[str]]] = None,
+        datasets: list[SupervisedDataset],
+        parameter_decomposition: dict[str, list[str]],
+        metric_decomposition: dict[str, list[str]] | None = None,
     ):
-        """Construct a `ContextualDataset`.
+        """Construct a ``ContextualDataset``.
 
         Args:
             datasets: A list of the datasets of individual tasks. Each dataset
@@ -516,11 +637,9 @@ class ContextualDataset(SupervisedDataset):
                 Values are the lists of metric names belonging to the context:
                 {'context1': ['m1_c1'], 'context2': ['m1_c2'],}.
         """
-        self.datasets: Dict[str, SupervisedDataset] = {
+        self.datasets: dict[str, SupervisedDataset] = {
             ds.outcome_names[0]: ds for ds in datasets
         }
-        self.feature_names = datasets[0].feature_names
-        self.outcome_names = list(self.datasets.keys())
         self.parameter_decomposition = parameter_decomposition
         self.metric_decomposition = metric_decomposition
         self._validate_datasets()
@@ -530,6 +649,15 @@ class ContextualDataset(SupervisedDataset):
             c: [self.feature_names.index(i) for i in parameter_decomposition[c]]
             for c in self.context_buckets
         }
+        self.group_indices = None
+
+    @property
+    def feature_names(self) -> list[str]:
+        return self.datasets[self.outcome_names[0]].feature_names
+
+    @property
+    def outcome_names(self) -> list[str]:
+        return list(self.datasets.keys())
 
     @property
     def X(self) -> Tensor:
@@ -548,7 +676,7 @@ class ContextualDataset(SupervisedDataset):
             return torch.cat(Ys, dim=-1)
 
     @property
-    def Yvar(self) -> Tensor:
+    def Yvar(self) -> Tensor | None:
         """Concatenates the Yvars from the child datasets to create the Y expected
         by LCEM model if there are multiple datasets; Or return the Yvar expected
         by LCEA model if there is only one dataset.
@@ -561,7 +689,7 @@ class ContextualDataset(SupervisedDataset):
         else:
             return torch.cat(Yvars, dim=-1)
 
-    def _extract_context_buckets(self) -> List[str]:
+    def _extract_context_buckets(self) -> list[str]:
         """Determines the context buckets from the data, and sets the
         context_buckets attribute.
 
@@ -572,9 +700,9 @@ class ContextualDataset(SupervisedDataset):
         buckets are taken from the parameter decomposition.
         """
         if len(self.outcome_names) > 1:
-            assert len(self.outcome_names) == len(
-                self.metric_decomposition
-            ), "Expected a single dataset, or one for each context bucket."
+            assert len(self.outcome_names) == len(self.metric_decomposition), (
+                "Expected a single dataset, or one for each context bucket."
+            )
             context_buckets = []
             for outcome_name in self.outcome_names:
                 for k, v in self.metric_decomposition.items():
@@ -653,3 +781,41 @@ class ContextualDataset(SupervisedDataset):
                     raise InputDataError(
                         f"{outcome} is missing in metric_decomposition."
                     )
+
+    def __eq__(self, other: Any) -> bool:
+        return (
+            type(other) is type(self)
+            and self.datasets == other.datasets
+            and self.parameter_decomposition == other.parameter_decomposition
+            and self.metric_decomposition == other.metric_decomposition
+        )
+
+    def clone(
+        self, deepcopy: bool = False, mask: Tensor | None = None
+    ) -> ContextualDataset:
+        """Return a copy of the dataset.
+
+        Args:
+            deepcopy: If True, perform a deep copy. Otherwise, use the same
+                tensors/lists/datasets.
+            mask: A ``n``-dim boolean mask indicating which rows to keep. This is used
+                along the -2 dimension. ``n`` here corresponds to the number of rows in
+                an individual dataset.
+
+        Returns:
+            The new dataset.
+        """
+        datasets = list(self.datasets.values())
+        if mask is not None or deepcopy:
+            datasets = [ds.clone(deepcopy=deepcopy, mask=mask) for ds in datasets]
+        if deepcopy:
+            parameter_decomposition = copy.deepcopy(self.parameter_decomposition)
+            metric_decomposition = copy.deepcopy(self.metric_decomposition)
+        else:
+            parameter_decomposition = self.parameter_decomposition
+            metric_decomposition = self.metric_decomposition
+        return ContextualDataset(
+            datasets=datasets,
+            parameter_decomposition=parameter_decomposition,
+            metric_decomposition=metric_decomposition,
+        )

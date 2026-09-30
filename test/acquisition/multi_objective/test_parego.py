@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 import torch
 from botorch.acquisition.logei import qLogNoisyExpectedImprovement
@@ -25,11 +25,12 @@ class TestqLogNParEGO(BotorchTestCase):
         with_constraints: bool = False,
         with_scalarization_weights: bool = False,
         with_objective: bool = False,
-        model: Optional[Model] = None,
+        model: Model | None = None,
+        incremental: bool = True,
     ) -> None:
         if with_constraints:
             assert with_objective, "Objective must be specified if constraints are."
-        tkwargs: Dict[str, Any] = {"device": self.device, "dtype": torch.double}
+        tkwargs: dict[str, Any] = {"device": self.device, "dtype": torch.double}
         num_objectives = 2
         num_constraints = 1 if with_constraints else 0
         num_outputs = num_objectives + num_constraints
@@ -57,6 +58,7 @@ class TestqLogNParEGO(BotorchTestCase):
             objective=objective,
             constraints=constraints,
             prune_baseline=True,
+            incremental=incremental,
         )
         self.assertEqual(acqf.Y_baseline.shape, torch.Size([3, 2]))
         # Scalarization weights should be set if given and sampled otherwise.
@@ -102,8 +104,11 @@ class TestqLogNParEGO(BotorchTestCase):
             with_constraints=True, with_objective=True, with_scalarization_weights=True
         )
 
+    def test_parego_with_non_incremental_ei(self) -> None:
+        self.base_test_parego(incremental=False)
+
     def test_parego_with_ensemble_model(self) -> None:
-        tkwargs: Dict[str, Any] = {"device": self.device, "dtype": torch.double}
+        tkwargs: dict[str, Any] = {"device": self.device, "dtype": torch.double}
         models = []
         for _ in range(2):
             model = SaasFullyBayesianSingleTaskGP(

@@ -17,7 +17,6 @@ q-acquisition functions we evaluate the joint value of the q-batch).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, Union
 
 import torch
 from botorch.acquisition.acquisition import AcquisitionFunction
@@ -28,7 +27,6 @@ from botorch.acquisition.objective import (
 )
 from botorch.generation.utils import _flip_sub_unique
 from botorch.models.model import Model
-
 from botorch.models.model_list_gp_regression import ModelListGP
 from botorch.models.multitask import MultiTaskGP
 from botorch.utils.sampling import batched_multinomial
@@ -38,24 +36,20 @@ from torch.nn import Module
 
 
 class SamplingStrategy(Module, ABC):
-    r"""
-    Abstract base class for sampling-based generation strategies.
-
-    :meta private:
-    """
+    """Abstract base class for sampling-based generation strategies."""
 
     @abstractmethod
     def forward(self, X: Tensor, num_samples: int = 1) -> Tensor:
         r"""Sample according to the SamplingStrategy.
 
         Args:
-            X: A `batch_shape x N x d`-dim Tensor from which to sample (in the `N`
+            X: A ``batch_shape x N x d``-dim Tensor from which to sample (in the ``N``
                 dimension).
             num_samples: The number of samples to draw.
 
         Returns:
-            A `batch_shape x num_samples x d`-dim Tensor of samples from `X`, where
-            `X[..., i, :]` is the `i`-th sample.
+            A ``batch_shape x num_samples x d``-dim Tensor of samples from ``X``, where
+            ``X[..., i, :]`` is the ``i``-th sample.
         """
 
         pass  # pragma: no cover
@@ -73,8 +67,8 @@ class MaxPosteriorSampling(SamplingStrategy):
     def __init__(
         self,
         model: Model,
-        objective: Optional[MCAcquisitionObjective] = None,
-        posterior_transform: Optional[PosteriorTransform] = None,
+        objective: MCAcquisitionObjective | None = None,
+        posterior_transform: PosteriorTransform | None = None,
         replacement: bool = True,
     ) -> None:
         r"""Constructor for the SamplingStrategy base class.
@@ -82,7 +76,7 @@ class MaxPosteriorSampling(SamplingStrategy):
         Args:
             model: A fitted model.
             objective: The MCAcquisitionObjective under which the samples are
-                evaluated. Defaults to `IdentityMCObjective()`.
+                evaluated. Defaults to ``IdentityMCObjective()``.
             posterior_transform: An optional PosteriorTransform.
             replacement: If True, sample with replacement.
         """
@@ -98,14 +92,14 @@ class MaxPosteriorSampling(SamplingStrategy):
         r"""Sample from the model posterior.
 
         Args:
-            X: A `batch_shape x N x d`-dim Tensor from which to sample (in the `N`
+            X: A ``batch_shape x N x d``-dim Tensor from which to sample (in the ``N``
                 dimension) according to the maximum posterior value under the objective.
             num_samples: The number of samples to draw.
             observation_noise: If True, sample with observation noise.
 
         Returns:
-            A `batch_shape x num_samples x d`-dim Tensor of samples from `X`, where
-            `X[..., i, :]` is the `i`-th sample.
+            A ``batch_shape x num_samples x d``-dim Tensor of samples from ``X``, where
+            ``X[..., i, :]`` is the ``i``-th sample.
         """
         posterior = self.model.posterior(
             X,
@@ -150,8 +144,10 @@ class MaxPosteriorSampling(SamplingStrategy):
         # to have shape batch_shape x num_samples
         if idcs.ndim > 1:
             idcs = idcs.permute(*range(1, idcs.ndim), 0)
-        # in order to use gather, we need to repeat the index tensor d times
-        idcs = idcs.unsqueeze(-1).expand(*idcs.shape, X.size(-1))
+        # in order to use gather, we need to repeat the index tensor d times.
+        # The contiguous call is needed due to a pytorch issue:
+        # https://github.com/pytorch/pytorch/issues/151978
+        idcs = idcs.unsqueeze(-1).expand(*idcs.shape, X.size(-1)).contiguous()
         # now if the model is batched batch_shape will not necessarily be the
         # batch_shape of X, so we expand X to the proper shape
         Xe = X.expand(*obj.shape[1:], X.size(-1))
@@ -162,16 +158,16 @@ class MaxPosteriorSampling(SamplingStrategy):
 class BoltzmannSampling(SamplingStrategy):
     r"""Sample from a set of points according to a tempered acquisition value.
 
-    Given an acquisition function `acq_func`, this sampling strategies draws
-    samples from a `batch_shape x N x d`-dim tensor `X` according to a multinomial
+    Given an acquisition function ``acq_func``, this sampling strategies draws
+    samples from a ``batch_shape x N x d``-dim tensor ``X`` according to a multinomial
     distribution over its indices given by
 
         weight(X[..., i, :]) ~ exp(eta * standardize(acq_func(X[..., i, :])))
 
-    where `standardize(Y)` standardizes `Y` to zero mean and unit variance. As the
-    temperature parameter `eta -> 0`, this approaches uniform sampling, while as
-    `eta -> infty`, this approaches selecting the maximizer(s) of the acquisition
-    function `acq_func`.
+    where ``standardize(Y)`` standardizes ``Y`` to zero mean and unit variance. As the
+    temperature parameter ``eta -> 0``, this approaches uniform sampling, while as
+    ``eta -> infty``, this approaches selecting the maximizer(s) of the acquisition
+    function ``acq_func``.
 
     Example:
         >>> UCB = UpperConfidenceBound(model, beta=0.1)
@@ -201,22 +197,23 @@ class BoltzmannSampling(SamplingStrategy):
         r"""Sample from a tempered value of the acquisition function value.
 
         Args:
-            X: A `batch_shape x N x d`-dim Tensor from which to sample (in the `N`
+            X: A ``batch_shape x N x d``-dim Tensor from which to sample (in the ``N``
                 dimension) according to the maximum posterior value under the objective.
                 Note that if a batched model is used in the underlying acquisition
-                function, then its batch shape must be broadcastable to `batch_shape`.
+                function, then its batch shape must be broadcastable to ``batch_shape``.
             num_samples: The number of samples to draw.
 
         Returns:
-            A `batch_shape x num_samples x d`-dim Tensor of samples from `X`, where
-            `X[..., i, :]` is the `i`-th sample.
+            A ``batch_shape x num_samples x d``-dim Tensor of samples from ``X``, where
+            ``X[..., i, :]`` is the ``i``-th sample.
         """
         # TODO: Can we get the model batch shape property from the model?
-        # we move the `N` dimension to the front for evaluating the acquisition function
-        # so that X_eval has shape `N x batch_shape x 1 x d`
+        # we move the ``N`` dimension to the front for evaluating the
+        # acquisition function so that X_eval has shape
+        # ``N x batch_shape x 1 x d``
         X_eval = X.permute(-2, *range(X.ndim - 2), -1).unsqueeze(-2)
         acqval = self.acq_func(X_eval)  # N x batch_shape
-        # now move the `N` dimension back (this is the number of categories)
+        # now move the ``N`` dimension back (this is the number of categories)
         acqval = acqval.permute(*range(1, X.ndim - 1), 0)  # batch_shape x N
         weights = torch.exp(self.eta * standardize(acqval))  # batch_shape x N
         idcs = batched_multinomial(
@@ -232,7 +229,7 @@ class ConstrainedMaxPosteriorSampling(MaxPosteriorSampling):
     Posterior sampling where we try to maximize an objective function while
     simulatenously satisfying a set of constraints c1(x) <= 0, c2(x) <= 0,
     ..., cm(x) <= 0 where c1, c2, ..., cm are black-box constraint functions.
-    Each constraint function is modeled by a seperate GP model. We follow the
+    Each constraint function is modeled by a separate GP model. We follow the
     procedure as described in https://doi.org/10.48550/arxiv.2002.08526.
 
     Example:
@@ -247,9 +244,9 @@ class ConstrainedMaxPosteriorSampling(MaxPosteriorSampling):
     def __init__(
         self,
         model: Model,
-        constraint_model: Union[ModelListGP, MultiTaskGP],
-        objective: Optional[MCAcquisitionObjective] = None,
-        posterior_transform: Optional[PosteriorTransform] = None,
+        constraint_model: ModelListGP | MultiTaskGP,
+        objective: MCAcquisitionObjective | None = None,
+        posterior_transform: PosteriorTransform | None = None,
         replacement: bool = True,
     ) -> None:
         r"""Constructor for the SamplingStrategy base class.
@@ -257,9 +254,9 @@ class ConstrainedMaxPosteriorSampling(MaxPosteriorSampling):
         Args:
             model: A fitted model.
             objective: The MCAcquisitionObjective under which the samples are evaluated.
-                Defaults to `IdentityMCObjective()`.
+                Defaults to ``IdentityMCObjective()``.
             posterior_transform: An optional PosteriorTransform for the objective
-                function (corresponding to `model`).
+                function (corresponding to ``model``).
             replacement: If True, sample with replacement.
             constraint_model: either a ModelListGP where each submodel is a GP model for
                 one constraint function, or a MultiTaskGP model where each task is one
@@ -291,13 +288,13 @@ class ConstrainedMaxPosteriorSampling(MaxPosteriorSampling):
                 the candidate with the smallest constraint violation.
 
         Args:
-            Y_samples: A `num_samples x batch_shape x num_cand x 1`-dim Tensor of
+            Y_samples: A ``num_samples x batch_shape x num_cand x 1``-dim Tensor of
                 samples from the objective function.
-            C_samples: A `num_samples x batch_shape x num_cand x num_constraints`-dim
+            C_samples: A ``num_samples x batch_shape x num_cand x num_constraints``-dim
                 Tensor of samples from the constraints.
 
         Returns:
-            A `num_samples x batch_shape x num_cand x 1`-dim Tensor of scores.
+            A ``num_samples x batch_shape x num_cand x 1``-dim Tensor of scores.
         """
         is_feasible = (C_samples <= 0).all(
             dim=-1
@@ -322,27 +319,36 @@ class ConstrainedMaxPosteriorSampling(MaxPosteriorSampling):
         r"""Sample from the model posterior.
 
         Args:
-            X: A `batch_shape x N x d`-dim Tensor from which to sample (in the `N`
+            X: A ``batch_shape x N x d``-dim Tensor from which to sample (in the ``N``
                 dimension) according to the maximum posterior value under the objective.
             num_samples: The number of samples to draw.
             observation_noise: If True, sample with observation noise.
 
         Returns:
-            A `batch_shape x num_samples x d`-dim Tensor of samples from `X`, where
-                `X[..., i, :]` is the `i`-th sample.
+            A ``batch_shape x num_samples x d``-dim Tensor of samples from ``X``, where
+                ``X[..., i, :]`` is the ``i``-th sample.
         """
         posterior = self.model.posterior(
             X=X,
             observation_noise=observation_noise,
-            # Note: `posterior_transform` is only used for the objective
+            # Note: ``posterior_transform`` is only used for the objective
             posterior_transform=self.posterior_transform,
         )
         Y_samples = posterior.rsample(sample_shape=torch.Size([num_samples]))
 
-        c_posterior = self.constraint_model.posterior(
-            X=X, observation_noise=observation_noise
+        # Loop over the constraint models (if possible) to reduce peak memory usage.
+        constraint_models = (
+            self.constraint_model.models
+            if isinstance(self.constraint_model, ModelListGP)
+            else [self.constraint_model]
         )
-        C_samples = c_posterior.rsample(sample_shape=torch.Size([num_samples]))
+        C_samples_list = []
+        for c_model in constraint_models:
+            c_posterior = c_model.posterior(X=X, observation_noise=observation_noise)
+            C_samples_list.append(
+                c_posterior.rsample(sample_shape=torch.Size([num_samples]))
+            )
+        C_samples = torch.cat(C_samples_list, dim=-1)
 
         # Convert the objective and constraint samples into a scalar-valued "score"
         scores = self._convert_samples_to_scores(

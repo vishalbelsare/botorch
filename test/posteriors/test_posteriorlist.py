@@ -9,14 +9,14 @@ import itertools
 import torch
 from botorch.posteriors.gpytorch import scalarize_posterior
 from botorch.posteriors.posterior_list import PosteriorList
-from botorch.utils.testing import _get_test_posterior, BotorchTestCase
+from botorch.utils.testing import BotorchTestCase, get_test_posterior
 
 
 class TestPosteriorList(BotorchTestCase):
     def test_scalarize_posterior_two_posteriors(self) -> None:
         """
         Test that when a PosteriorList has two posteriors, result of
-        `scalarize_posterior` matches quantitative expectations, analyitically
+        ``scalarize_posterior`` matches quantitative expectations, analyitically
         computed by hand.
         """
         m = 1
@@ -25,7 +25,7 @@ class TestPosteriorList(BotorchTestCase):
         ):
             tkwargs = {"device": self.device, "dtype": dtype}
 
-            posterior = _get_test_posterior(batch_shape, m=m, lazy=lazy, **tkwargs)
+            posterior = get_test_posterior(batch_shape, m=m, lazy=lazy, **tkwargs)
             posterior_list = PosteriorList(posterior, posterior)
             scalarized_posterior = scalarize_posterior(
                 posterior, weights=torch.ones(1, **tkwargs)
@@ -51,7 +51,7 @@ class TestPosteriorList(BotorchTestCase):
     def test_scalarize_posterior_one_posterior(self) -> None:
         """
         Test that when a PosteriorList has one posterior, result of
-        `scalarize_posterior` matches result of calling `scalarize_posterior`
+        ``scalarize_posterior`` matches result of calling ``scalarize_posterior``
         on that posterior.
         """
         m = 1
@@ -65,7 +65,7 @@ class TestPosteriorList(BotorchTestCase):
             while torch.any(weights.abs() < 0.1):
                 weights = torch.randn(m, **tkwargs)
             # test q=1
-            posterior = _get_test_posterior(batch_shape, m=m, lazy=lazy, **tkwargs)
+            posterior = get_test_posterior(batch_shape, m=m, lazy=lazy, **tkwargs)
             posterior_list = PosteriorList(posterior)
             new_posterior = scalarize_posterior(posterior, weights, offset)
             new_post_from_list = scalarize_posterior(posterior_list, weights, offset)
@@ -77,8 +77,8 @@ class TestPosteriorList(BotorchTestCase):
 
     def test_scalarize_posterior_raises_not_implemented(self) -> None:
         """
-        Test that `scalarize_posterior` raises `NotImplementedError` when provided
-        input shapes that are not supported for `PosteriorList`.
+        Test that ``scalarize_posterior`` raises ``NotImplementedError`` when provided
+        input shapes that are not supported for ``PosteriorList``.
         """
         for batch_shape, m, lazy, dtype in itertools.product(
             ([], [3]), (1, 2), (False, True), (torch.float, torch.double)
@@ -90,7 +90,7 @@ class TestPosteriorList(BotorchTestCase):
             while torch.any(weights.abs() < 0.1):
                 weights = torch.randn(m, **tkwargs)
             # test q=1
-            posterior = _get_test_posterior(batch_shape, m=m, lazy=lazy, **tkwargs)
+            posterior = get_test_posterior(batch_shape, m=m, lazy=lazy, **tkwargs)
             posterior_list = PosteriorList(posterior)
             if m > 1:
                 with self.assertRaisesRegex(
@@ -102,7 +102,7 @@ class TestPosteriorList(BotorchTestCase):
 
             # test q=2, interleaved
             q = 2
-            posterior = _get_test_posterior(
+            posterior = get_test_posterior(
                 batch_shape, q=q, m=m, lazy=lazy, interleaved=True, **tkwargs
             )
             posterior_list = PosteriorList(posterior)
@@ -116,7 +116,7 @@ class TestPosteriorList(BotorchTestCase):
             # test q=2, non-interleaved
             # test independent special case as well
             for independent in (False, True) if m > 1 else (False,):
-                posterior = _get_test_posterior(
+                posterior = get_test_posterior(
                     batch_shape,
                     q=q,
                     m=m,

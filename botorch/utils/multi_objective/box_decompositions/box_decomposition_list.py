@@ -8,8 +8,6 @@ r"""Box decomposition container."""
 
 from __future__ import annotations
 
-from typing import List, Union
-
 import torch
 from botorch.exceptions.errors import BotorchTensorDimensionError
 from botorch.utils.multi_objective.box_decompositions.box_decomposition import (
@@ -37,14 +35,14 @@ class BoxDecompositionList(Module):
         self.box_decompositions = ModuleList(box_decompositions)
 
     @property
-    def pareto_Y(self) -> List[Tensor]:
+    def pareto_Y(self) -> list[Tensor]:
         r"""This returns the non-dominated set.
 
         Note: Internally, we store the negative pareto set (minimization).
 
         Returns:
-            A list where the ith element is the `n_pareto_i x m`-dim tensor
-                of pareto optimal outcomes for each box_decomposition `i`.
+            A list where the ith element is the ``n_pareto_i x m``-dim tensor
+                of pareto optimal outcomes for each box_decomposition ``i``.
         """
         return [p.pareto_Y for p in self.box_decompositions]
 
@@ -55,7 +53,7 @@ class BoxDecompositionList(Module):
         Note: Internally, we store the negative reference point (minimization).
 
         Returns:
-            A `n_box_decompositions x m`-dim tensor of outcomes.
+            A ``n_box_decompositions x m``-dim tensor of outcomes.
         """
         return torch.stack([p.ref_point for p in self.box_decompositions], dim=0)
 
@@ -63,7 +61,7 @@ class BoxDecompositionList(Module):
         r"""Get the bounds of each hypercell in the decomposition.
 
         Returns:
-            A `2 x n_box_decompositions x num_cells x num_outcomes`-dim tensor
+            A ``2 x n_box_decompositions x num_cells x num_outcomes``-dim tensor
                 containing the lower and upper vertices bounding each hypercell.
         """
         bounds_list = []
@@ -94,19 +92,19 @@ class BoxDecompositionList(Module):
 
         return torch.stack(bounds_list, dim=-3)
 
-    def update(self, Y: Union[List[Tensor], Tensor]) -> None:
+    def update(self, Y: list[Tensor] | Tensor) -> None:
         r"""Update the partitioning.
 
         Args:
-            Y: A `n_box_decompositions x n x num_outcomes`-dim tensor or a list
+            Y: A ``n_box_decompositions x n x num_outcomes``-dim tensor or a list
                 where the ith  element contains the new points for
-                box_decomposition `i`.
+                box_decomposition ``i``.
         """
         if (
             torch.is_tensor(Y)
             and Y.ndim != 3
             and Y.shape[0] != len(self.box_decompositions)
-        ) or (isinstance(Y, List) and len(Y) != len(self.box_decompositions)):
+        ) or (isinstance(Y, list) and len(Y) != len(self.box_decompositions)):
             raise BotorchTensorDimensionError(
                 "BoxDecompositionList.update requires either a batched tensor Y, "
                 "with one batch per box decomposition or a list of tensors with "
@@ -119,7 +117,7 @@ class BoxDecompositionList(Module):
         r"""Compute hypervolume that is dominated by the Pareto Froniter.
 
         Returns:
-            A `(batch_shape)`-dim tensor containing the hypervolume dominated by
+            A ``(batch_shape)``-dim tensor containing the hypervolume dominated by
                 each Pareto frontier.
         """
         return torch.stack(

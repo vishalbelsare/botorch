@@ -11,7 +11,7 @@ Posterior module to be used with GPyTorch models.
 from __future__ import annotations
 
 from contextlib import ExitStack
-from typing import Optional, Tuple, TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 
 import torch
 from botorch.exceptions.errors import BotorchTensorDimensionError
@@ -45,7 +45,7 @@ class GPyTorchPosterior(TorchPosterior):
                 MultitaskMultivariateNormal (multi-output case).
         """
         super().__init__(distribution=distribution)
-        self._is_mt = isinstance(distribution, MultitaskMultivariateNormal)
+        self._is_mt: bool = isinstance(distribution, MultitaskMultivariateNormal)
 
     @property
     def mvn(self) -> MultivariateNormal:
@@ -58,11 +58,11 @@ class GPyTorchPosterior(TorchPosterior):
         return self.distribution.batch_shape + self.distribution.base_sample_shape
 
     @property
-    def batch_range(self) -> Tuple[int, int]:
+    def batch_range(self) -> tuple[int, int]:
         r"""The t-batch range.
 
         This is used in samplers to identify the t-batch component of the
-        `base_sample_shape`. The base samples are expanded over the t-batches to
+        ``base_sample_shape``. The base samples are expanded over the t-batches to
         provide consistency in the acquisition values, i.e., to ensure that a
         candidate produces same value regardless of its position on the t-batch.
         """
@@ -72,10 +72,11 @@ class GPyTorchPosterior(TorchPosterior):
             return (0, -1)
 
     def _extended_shape(
-        self, sample_shape: torch.Size = torch.Size()  # noqa: B008
+        self,
+        sample_shape: torch.Size = torch.Size(),  # noqa: B008
     ) -> torch.Size:
         r"""Returns the shape of the samples produced by the posterior with
-        the given `sample_shape`.
+        the given ``sample_shape``.
         """
         base_shape = self.distribution.batch_shape + self.distribution.event_shape
         if not self._is_mt:
@@ -93,16 +94,16 @@ class GPyTorchPosterior(TorchPosterior):
         samples, and enables acquisition optimization via Sample Average Approximation.
 
         Args:
-            sample_shape: A `torch.Size` object specifying the sample shape. To
-                draw `n` samples, set to `torch.Size([n])`. To draw `b` batches
-                of `n` samples each, set to `torch.Size([b, n])`.
-            base_samples: A Tensor of `N(0, I)` base samples of shape
-                `sample_shape x base_sample_shape`, typically obtained from
-                a `Sampler`. This is used for deterministic optimization.
+            sample_shape: A ``torch.Size`` object specifying the sample shape. To
+                draw ``n`` samples, set to ``torch.Size([n])``. To draw ``b`` batches
+                of ``n`` samples each, set to ``torch.Size([b, n])``.
+            base_samples: A Tensor of ``N(0, I)`` base samples of shape
+                ``sample_shape x base_sample_shape``, typically obtained from
+                a ``Sampler``. This is used for deterministic optimization.
 
         Returns:
             Samples from the posterior, a tensor of shape
-            `self._extended_shape(sample_shape=sample_shape)`.
+            ``self._extended_shape(sample_shape=sample_shape)``.
         """
         if base_samples.shape[: len(sample_shape)] != sample_shape:
             raise RuntimeError(
@@ -125,17 +126,17 @@ class GPyTorchPosterior(TorchPosterior):
             samples = samples.unsqueeze(-1)
         return samples
 
-    def rsample(self, sample_shape: Optional[torch.Size] = None) -> Tensor:
+    def rsample(self, sample_shape: torch.Size | None = None) -> Tensor:
         r"""Sample from the posterior (with gradients).
 
         Args:
-            sample_shape: A `torch.Size` object specifying the sample shape. To
-                draw `n` samples, set to `torch.Size([n])`. To draw `b` batches
-                of `n` samples each, set to `torch.Size([b, n])`.
+            sample_shape: A ``torch.Size`` object specifying the sample shape. To
+                draw ``n`` samples, set to ``torch.Size([n])``. To draw ``b`` batches
+                of ``n`` samples each, set to ``torch.Size([b, n])``.
 
         Returns:
             Samples from the posterior, a tensor of shape
-            `self._extended_shape(sample_shape=sample_shape)`.
+            ``self._extended_shape(sample_shape=sample_shape)``.
         """
         if sample_shape is None:
             sample_shape = torch.Size([1])
@@ -193,23 +194,23 @@ def scalarize_posterior_gpytorch(
     posterior: GPyTorchPosterior,
     weights: Tensor,
     offset: float = 0.0,
-) -> Tuple[Tensor, Union[Tensor, LinearOperator]]:
-    r"""Helper function for `scalarize_posterior`, producing a mean and
+) -> tuple[Tensor, Tensor | LinearOperator]:
+    r"""Helper function for ``scalarize_posterior``, producing a mean and
     variance.
 
-    This mean and variance are consumed by `scalarize_posterior` to produce
-    a `GPyTorchPosterior`.
+    This mean and variance are consumed by ``scalarize_posterior`` to produce
+    a ``GPyTorchPosterior``.
 
     Args:
-        posterior: The posterior over `m` outcomes to be scalarized.
-            Supports `t`-batching.
-        weights: A tensor of weights of size `m`.
+        posterior: The posterior over ``m`` outcomes to be scalarized.
+            Supports ``t``-batching.
+        weights: A tensor of weights of size ``m``.
         offset: The offset of the affine transformation.
 
     Returns:
         The transformed (single-output) posterior. If the input posterior has
-            mean `mu` and covariance matrix `Sigma`, this posterior has mean
-            `weights^T * mu` and variance `weights^T Sigma w`.
+            mean ``mu`` and covariance matrix ``Sigma``, this posterior has mean
+            ``weights^T * mu`` and variance ``weights^T Sigma w``.
 
     Example:
         Example for a model with two outcomes:
@@ -223,7 +224,7 @@ def scalarize_posterior_gpytorch(
     """
     mean = posterior.mean
     q, m = mean.shape[-2:]
-    _validate_scalarize_inputs(weights, m)
+    _validate_scalarize_inputs(weights=weights, m=m)
     batch_shape = mean.shape[:-2]
     mvn = posterior.distribution
     cov = mvn.lazy_covariance_matrix if mvn.islazy else mvn.covariance_matrix
@@ -271,23 +272,23 @@ def scalarize_posterior_gpytorch(
 
 
 def scalarize_posterior(
-    posterior: Union[GPyTorchPosterior, PosteriorList],
+    posterior: GPyTorchPosterior | PosteriorList,
     weights: Tensor,
     offset: float = 0.0,
 ) -> GPyTorchPosterior:
     r"""Affine transformation of a multi-output posterior.
 
     Args:
-        posterior: The posterior over `m` outcomes to be scalarized.
-            Supports `t`-batching. Can be either a `GPyTorchPosterior`,
-            or a `PosteriorList` that contains GPyTorchPosteriors all with q=1.
-        weights: A tensor of weights of size `m`.
+        posterior: The posterior over ``m`` outcomes to be scalarized.
+            Supports ``t``-batching. Can be either a ``GPyTorchPosterior``,
+            or a ``PosteriorList`` that contains GPyTorchPosteriors all with q=1.
+        weights: A tensor of weights of size ``m``.
         offset: The offset of the affine transformation.
 
     Returns:
         The transformed (single-output) posterior. If the input posterior has
-            mean `mu` and covariance matrix `Sigma`, this posterior has mean
-            `weights^T * mu` and variance `weights^T Sigma w`.
+            mean ``mu`` and covariance matrix ``Sigma``, this posterior has mean
+            ``weights^T * mu`` and variance ``weights^T Sigma w``.
 
     Example:
         Example for a model with two outcomes:

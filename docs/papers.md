@@ -18,6 +18,28 @@ The main reference for BoTorch is
 
 Here is an incomplete selection of peer-reviewed Bayesian optimization papers that build off of BoTorch:
 
+- [Ax: A Platform for Adaptive Experimentation](https://openreview.net/forum?id=U1f6wHtG1g). Miles Olson, Elizabeth Santorella, Louis C. Tiao, Sait Cakmak, Mia Garrard, Samuel Daulton, Zhiyuan Jerry Lin, Sebastian Ament, Bernard Beckerman, Eric Onofrey, Paschal Igusti, Cristian Lara, Benjamin Letham, Cesar Cardoso, Shiyun Sunny Shen, Andy Chenyuan Lin, Matthew Grange, Elena Kashtelyan, David Eriksson, Maximilian Balandat. In AutoML 2025 ABCD Track, 2025.
+
+- [BoFire: Bayesian Optimization Framework Intended for Real Experiments](https://www.jmlr.org/papers/v26/24-1540.html). Johannes P. Dürholt, Thomas S. Asche, Johanna Kleinekorte, Gabriel Mancino-Ball,  Benjamin Schiller, Simon Sung, Julian Keupp, Aaron Osburg, Toby Boyne, Ruth Misener, Rosona Eldred, Chrysoula Kappatou, Robert M. Lee, Dominik Linzner, Wagner Steuer Costa, David Walz, Niklas Wulkow, Behrang Shafei. Journal of Machine Learning Research, 2025.
+
+- [Best Practices for Multi-fidelity Bayesian Optimization in Materials and Molecular Research](https://www.nature.com/articles/s43588-025-00001-0). Víctor Sabanza-Gil, Riccardo Barbano, Daniel Pacheco Gutiérrez, Jeremy S. Luterbacher, José Miguel Hernández-Lobato, Philippe Schwaller, Loïc Roch. Nature Computational Science 2025.
+
+- [Return of the Latent Space COWBOYS: Re-thinking the Use of VAEs for Bayesian Optimisation of Structured Spaces](https://arxiv.org/abs/2507.03910). Henry B. Moss, Sebastian W. Ober, Tom Diethe. ICML 2025.
+
+- [Robust Gaussian Processes via Relevance Pursuit](https://arxiv.org/abs/2410.24222). Sebastian Ament, David Eriksson, Elizabeth Santorella, Ben Letham, Max Balandat, Eytan Bakshy. NeurIPS 2024.
+
+- [Active Learning for Derivative-Based Global Sensitivity Analysis with Gaussian Processes](https://arxiv.org/abs/2407.09739). Syrine Belakaria, Ben Letham, Janardhan R. Doppa, Barbara Engelhardt, Stefano Ermon, Eytan Bakshy. NeurIPS 2024.
+
+- [Approximation-Aware Bayesian Optimization](https://arxiv.org/abs/2406.04308). Natalie Maus, Kyurae Kim, Geoff Pleiss, David Eriksson, John P. Cunningham, Jacob R. Gardner. NeurIPS 2024.
+
+- [Bayesian Optimization of Function Networks with Partial Evaluations](https://arxiv.org/abs/2311.02146). Poompol Buathong, Jiayue Wan, Raul Astudillo, Sam Daulton, Maximilian Balandat, Peter I. Frazier. ICML 2024.
+
+- [Joint Composite Latent Space Bayesian Optimization](https://arxiv.org/abs/2311.02213). Natalie Maus, Zhiyuan Jerry Lin, Maximilian Balandat, Eytan Bakshy. ICML 2024.
+
+- [Accelerating Look-ahead in Bayesian Optimization: Multilevel Monte Carlo is All you Need](https://arxiv.org/abs/2402.02111). Shangda Yang, Vitaly Zankin, Maximilian Balandat, Stefan Scherer, Kevin Thomas Carlberg, Neil Walton, Kody J. H. Law. ICML 2024.
+
+- [Response Time Improves Choice Prediction and Function Estimation for Gaussian Process Models of Perception and Preferences](https://arxiv.org/abs/2306.06296). Michael Shvartsman, Benjamin Letham, Stephen Keeley. UAI 2024.
+
 - [Advancing Bayesian Optimization via Learning Correlated Latent Space](https://arxiv.org/pdf/2310.20258.pdf). Seunghun Lee, Jaewon Chu, Sihyeon Kim, Juyeon Ko, Hyunwoo J. Kim. NeurIPS 2023.
 
 - [Unexpected Improvements to Expected Improvement for Bayesian Optimization](https://arxiv.org/abs/2310.20708). Sebastian Ament, Samuel Daulton, David Eriksson, Maximilian Balandat, Eytan Bakshy. NeurIPS 2023.

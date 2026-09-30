@@ -8,153 +8,87 @@
 
 from __future__ import annotations
 
-from functools import partial
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from collections.abc import Callable, Sequence
+from typing import Any
 
+import numpy as np
+import numpy.typing as npt
 import torch
-from botorch.optim.utils import (
-    _handle_numerical_errors,
-    get_tensors_as_ndarray_1d,
-    set_tensors_from_ndarray_1d,
-)
+from botorch.optim.utils import _handle_numerical_errors
 from botorch.optim.utils.numpy_utils import as_ndarray
 from botorch.utils.context_managers import zero_grad_ctx
-from numpy import float64 as np_float64, full as np_full, ndarray, zeros as np_zeros
+from numpy import float64 as np_float64, zeros as np_zeros
 from torch import Tensor
+
+FILL_VALUE = 0.0
 
 
 class ForwardBackwardClosure:
     r"""Wrapper for fused forward and backward closures."""
 
     def __init__(
-        self,
-        forward: Callable[[], Tensor],
-        parameters: Dict[str, Tensor],
-        backward: Callable[[Tensor], None] = Tensor.backward,
-        reducer: Optional[Callable[[Tensor], Tensor]] = torch.sum,
-        callback: Optional[Callable[[Tensor, Sequence[Optional[Tensor]]], None]] = None,
-        context_manager: Callable = None,  # pyre-ignore [9]
+        self, forward: Callable[[], Tensor], parameters: dict[str, Tensor]
     ) -> None:
         r"""Initializes a ForwardBackwardClosure instance.
 
         Args:
-            closure: Callable that returns a tensor.
-            parameters: A dictionary of tensors whose `grad` fields are to be returned.
-            backward: Callable that takes the (reduced) output of `forward` and sets the
-                `grad` attributes of tensors in `parameters`.
-            reducer: Optional callable used to reduce the output of the forward pass.
-            callback: Optional callable that takes the reduced output of `forward` and
-                the gradients of `parameters` as positional arguments.
-            context_manager: A ContextManager used to wrap each forward-backward call.
-                When passed as `None`, `context_manager` defaults to a `zero_grad_ctx`
-                that zeroes the gradients of `parameters` upon entry.
+            forward: Callable that returns a tensor.
+            parameters: A dictionary of tensors whose ``grad`` fields are to
+                be returned.
         """
-        if context_manager is None:
-            context_manager = partial(zero_grad_ctx, parameters)
-
         self.forward = forward
-        self.backward = backward
         self.parameters = parameters
-        self.reducer = reducer
-        self.callback = callback
-        self.context_manager = context_manager
 
-    def __call__(self, **kwargs: Any) -> Tuple[Tensor, Tuple[Optional[Tensor], ...]]:
-        with self.context_manager():
-            values = self.forward(**kwargs)
-            value = values if self.reducer is None else self.reducer(values)
-            self.backward(value)
+    def __call__(self, **kwargs: Any) -> tuple[Tensor, tuple[Tensor | None, ...]]:
+        with zero_grad_ctx(parameters=self.parameters):
+            value = self.forward(**kwargs).sum()
+            value.backward()
 
             grads = tuple(param.grad for param in self.parameters.values())
-            if self.callback:
-                self.callback(value, grads)
-
             return value, grads
 
 
 class NdarrayOptimizationClosure:
     r"""Adds stateful behavior and a numpy.ndarray-typed API to a closure with an
-    expected return type Tuple[Tensor, Union[Tensor, Sequence[Optional[Tensor]]]]."""
+    expected return type Tuple[Tensor, Union[Tensor, Sequence[Optional[Tensor]]]].
+
+    NaN values will be replaced with 0.0 in the returned ndarray."""
 
     def __init__(
         self,
-        closure: Callable[[], Tuple[Tensor, Sequence[Optional[Tensor]]]],
-        parameters: Dict[str, Tensor],
-        as_array: Callable[[Tensor], ndarray] = None,  # pyre-ignore [9]
-        as_tensor: Callable[[ndarray], Tensor] = torch.as_tensor,
-        get_state: Callable[[], ndarray] = None,  # pyre-ignore [9]
-        set_state: Callable[[ndarray], None] = None,  # pyre-ignore [9]
-        fill_value: float = 0.0,
-        persistent: bool = True,
+        closure: Callable[[], tuple[Tensor, Sequence[Tensor | None]]],
+        parameters: dict[str, Tensor],
     ) -> None:
         r"""Initializes a NdarrayOptimizationClosure instance.
 
         Args:
             closure: A ForwardBackwardClosure instance.
             parameters: A dictionary of tensors representing the closure's state.
-                Expected to correspond with the first `len(parameters)` optional
-                gradient tensors returned by `closure`.
-            as_array: Callable used to convert tensors to ndarrays.
-            as_tensor: Callable used to convert ndarrays to tensors.
-            get_state: Callable that returns the closure's state as an ndarray. When
-                passed as `None`, defaults to calling `get_tensors_as_ndarray_1d`
-                on `closure.parameters` while passing `as_array` (if given by the user).
-            set_state: Callable that takes a 1-dimensional ndarray and sets the
-                closure's state. When passed as `None`, `set_state` defaults to
-                calling `set_tensors_from_ndarray_1d` with `closure.parameters` and
-                a given ndarray while passing `as_tensor`.
-            fill_value: Fill value for parameters whose gradients are None. In most
-                cases, `fill_value` should either be zero or NaN.
-            persistent: Boolean specifying whether an ndarray should be retained
-                as a persistent buffer for gradients.
+                Expected to correspond with the first ``len(parameters)`` optional
+                gradient tensors returned by ``closure``.
         """
-        if get_state is None:
-            # Note: Numpy supports copying data between ndarrays with different dtypes.
-            # Hence, our default behavior need not coerce the ndarray representations
-            # of tensors in `parameters` to float64 when copying over data.
-            _as_array = as_ndarray if as_array is None else as_array
-            get_state = partial(
-                get_tensors_as_ndarray_1d,
-                tensors=parameters,
-                dtype=np_float64,
-                as_array=_as_array,
-            )
-
-        if as_array is None:  # per the note, do this after resolving `get_state`
-            as_array = partial(as_ndarray, dtype=np_float64)
-
-        if set_state is None:
-            set_state = partial(
-                set_tensors_from_ndarray_1d, parameters, as_tensor=as_tensor
-            )
 
         self.closure = closure
         self.parameters = parameters
-
-        self.as_array = as_ndarray
-        self.as_tensor = as_tensor
-        self._get_state = get_state
-        self._set_state = set_state
-
-        self.fill_value = fill_value
-        self.persistent = persistent
-        self._gradient_ndarray: Optional[ndarray] = None
+        self._gradient_ndarray: npt.NDArray | None = None
 
     def __call__(
-        self, state: Optional[ndarray] = None, **kwargs: Any
-    ) -> Tuple[ndarray, ndarray]:
+        self, state: npt.NDArray | None = None, **kwargs: Any
+    ) -> tuple[npt.NDArray, npt.NDArray]:
         if state is not None:
             self.state = state
 
         try:
             value_tensor, grad_tensors = self.closure(**kwargs)
-            value = self.as_array(value_tensor)
-            grads = self._get_gradient_ndarray(fill_value=self.fill_value)
+            value = as_ndarray(values=value_tensor, dtype=np_float64)
+            grads = self._get_gradient_ndarray()
             index = 0
             for param, grad in zip(self.parameters.values(), grad_tensors):
                 size = param.numel()
                 if grad is not None:
-                    grads[index : index + size] = self.as_array(grad.view(-1))
+                    grads[index : index + size] = as_ndarray(
+                        values=grad.view(-1), dtype=np_float64
+                    )
                 index += size
         except RuntimeError as e:
             value, grads = _handle_numerical_errors(e, x=self.state, dtype=np_float64)
@@ -162,26 +96,185 @@ class NdarrayOptimizationClosure:
         return value, grads
 
     @property
-    def state(self) -> ndarray:
-        return self._get_state()
+    def state(self) -> npt.NDArray:
+        if len(self.parameters) == 0:
+            raise RuntimeError("No parameters to get state from.")
+
+        size = sum(tnsr.numel() for tnsr in self.parameters.values())
+        tnsr = next(iter(self.parameters.values()))
+        dtype = np_float64
+
+        out = np.empty([size], dtype=dtype)
+
+        index = 0
+        for tnsr in self.parameters.values():
+            size = tnsr.numel()
+            out[index : index + size] = as_ndarray(tnsr.view(-1))
+            index += size
+
+        return out
 
     @state.setter
-    def state(self, state: ndarray) -> None:
-        self._set_state(state)
+    def state(self, state: npt.NDArray) -> None:
+        with torch.no_grad():
+            index = 0
+            for tnsr in self.parameters.values():
+                size = tnsr.numel()
+                vals = state[index : index + size] if tnsr.ndim else state[index]
+                tnsr.copy_(
+                    torch.as_tensor(vals, device=tnsr.device, dtype=tnsr.dtype).view(
+                        tnsr.shape
+                    )
+                )
+                index += size
 
-    def _get_gradient_ndarray(self, fill_value: Optional[float] = None) -> ndarray:
-        if self.persistent and self._gradient_ndarray is not None:
-            if fill_value is not None:
-                self._gradient_ndarray.fill(fill_value)
+    def _get_gradient_ndarray(self) -> npt.NDArray:
+        if self._gradient_ndarray is not None:
+            self._gradient_ndarray.fill(FILL_VALUE)
             return self._gradient_ndarray
 
         size = sum(param.numel() for param in self.parameters.values())
-        array = (
-            np_zeros(size, dtype=np_float64)
-            if fill_value is None or fill_value == 0.0
-            else np_full(size, fill_value, dtype=np_float64)
-        )
-        if self.persistent:
-            self._gradient_ndarray = array
+        self._gradient_ndarray = np_zeros(size, dtype=np_float64)
+        return self._gradient_ndarray
 
-        return array
+
+class BatchedNDarrayOptimizationClosure:
+    r"""Wraps a forward closure and batched parameters for use with
+    ``fmin_l_bfgs_b_batched``.
+
+    Unlike ``NdarrayOptimizationClosure`` which flattens all parameters into a
+    single 1D vector, this class manages parameters as a 2D array of shape
+    ``(batch_size, per_element_size)`` where each row corresponds to one batch
+    element's independent parameter vector.
+
+    This enables independent optimization of each batch element (e.g., each
+    output of a ``BatchedMultiOutputGPyTorchModel``) using batched L-BFGS-B.
+    """
+
+    def __init__(
+        self,
+        forward: Callable[[], Tensor],
+        parameters: dict[str, Tensor],
+        batch_shape: torch.Size,
+    ) -> None:
+        r"""Initializes a BatchedNDarrayOptimizationClosure instance.
+
+        Args:
+            forward: Callable that returns a tensor of shape ``batch_shape``
+                (per-batch-element loss values, e.g., negated per-output MLL).
+            parameters: A dictionary of parameter tensors, each with shape
+                ``(*batch_shape, *trailing_shape)``.
+            batch_shape: The batch shape shared by all parameters (typically
+                ``model._aug_batch_shape``).
+        """
+        self.forward = forward
+        self.parameters = parameters
+        self.batch_shape = batch_shape
+        self.batch_size = max(int(torch.Size(batch_shape).numel()), 1)
+        n_batch_dims = len(batch_shape)
+
+        self._trailing_sizes: dict[str, int] = {}
+        self._per_element_size = 0
+        for name, param in parameters.items():
+            trailing = param.shape[n_batch_dims:]
+            trailing_numel = max(int(torch.Size(trailing).numel()), 1)
+            self._trailing_sizes[name] = trailing_numel
+            self._per_element_size += trailing_numel
+
+    @property
+    def state(self) -> npt.NDArray:
+        """Returns the current parameter state as a 2D ndarray of shape
+        ``(batch_size, per_element_size)``."""
+        out = np.empty((self.batch_size, self._per_element_size), dtype=np_float64)
+        index = 0
+        for name, param in self.parameters.items():
+            size = self._trailing_sizes[name]
+            out[:, index : index + size] = as_ndarray(
+                param.detach().reshape(self.batch_size, size), dtype=np_float64
+            )
+            index += size
+        return out
+
+    @state.setter
+    def state(self, state: npt.NDArray) -> None:
+        """Sets parameter values from a 2D ndarray of shape
+        ``(batch_size, per_element_size)``."""
+        with torch.no_grad():
+            index = 0
+            for name, param in self.parameters.items():
+                size = self._trailing_sizes[name]
+                vals = state[:, index : index + size]
+                param.copy_(
+                    torch.as_tensor(
+                        vals, device=param.device, dtype=param.dtype
+                    ).reshape(param.shape)
+                )
+                index += size
+
+    def __call__(
+        self,
+        state: npt.NDArray | None = None,
+        batch_indices: npt.NDArray | None = None,
+        **kwargs: Any,
+    ) -> tuple[npt.NDArray, npt.NDArray]:
+        """Evaluate the closure and return per-batch values and gradients.
+
+        Args:
+            state: Optional 2D ndarray to set as the current state before
+                evaluation. Shape ``(active_batch_size, per_element_size)``
+                if ``batch_indices`` is provided, else
+                ``(batch_size, per_element_size)``.
+            batch_indices: Optional 1D ndarray of indices into the original
+                batch, indicating which elements are being evaluated.
+                Used with ``fmin_l_bfgs_b_batched(pass_batch_indices=True)``.
+            **kwargs: Keyword arguments passed to ``self.forward``.
+
+        Returns:
+            A tuple ``(values, grads)`` where ``values`` has shape
+            ``(active_batch_size,)`` and ``grads`` has shape
+            ``(active_batch_size, per_element_size)``.
+        """
+        if state is not None:
+            if batch_indices is not None:
+                # Update only active batch elements
+                full_state = self.state
+                full_state[batch_indices] = state
+                self.state = full_state
+            else:
+                self.state = state
+
+        try:
+            with zero_grad_ctx(parameters=self.parameters):
+                per_batch_values = self.forward(**kwargs)
+                scalar = per_batch_values.sum()
+                scalar.backward()
+
+                values = as_ndarray(
+                    per_batch_values.detach().reshape(self.batch_size),
+                    dtype=np_float64,
+                )
+
+                grads = np.zeros(
+                    (self.batch_size, self._per_element_size), dtype=np_float64
+                )
+                index = 0
+                for name, param in self.parameters.items():
+                    size = self._trailing_sizes[name]
+                    if param.grad is not None:
+                        grads[:, index : index + size] = as_ndarray(
+                            param.grad.reshape(self.batch_size, size),
+                            dtype=np_float64,
+                        )
+                    index += size
+        except RuntimeError as e:
+            value, grad_flat = _handle_numerical_errors(
+                e, x=self.state.ravel(), dtype=np_float64
+            )
+            values = np.full(self.batch_size, value / self.batch_size, dtype=np_float64)
+            grads = np.zeros(
+                (self.batch_size, self._per_element_size), dtype=np_float64
+            )
+
+        if batch_indices is not None:
+            return values[batch_indices], grads[batch_indices]
+        return values, grads

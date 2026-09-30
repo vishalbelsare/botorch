@@ -17,9 +17,8 @@ r"""
 
 from __future__ import annotations
 
-from typing import Optional, Union
-
 from botorch.models.approximate_gp import ApproximateGPyTorchModel
+from botorch.models.deterministic import GenericDeterministicModel, MatheronPathModel
 from botorch.models.model_list_gp_regression import ModelListGP
 from botorch.sampling.pathwise.paths import PathDict, PathList, SamplePath
 from botorch.sampling.pathwise.prior_samplers import (
@@ -54,8 +53,8 @@ class MatheronPath(PathDict):
                                                 v
                                           "Update path"
 
-    where `=` denotes equality in distribution, :math:`f \sim GP(0, k)`,
-    :math:`y \sim N(f(X), \Sigma)`, and :math:`\epsilon \sim N(0, \Sigma)`.
+    where ``=`` denotes equality in distribution, :math:``f \sim GP(0, k)``,
+    :math:``y \sim N(f(X), \Sigma)``, and :math:``\epsilon \sim N(0, \Sigma)``.
     For more information, see [wilson2020sampling]_ and [wilson2021pathwise]_.
     """
 
@@ -63,8 +62,8 @@ class MatheronPath(PathDict):
         self,
         prior_paths: SamplePath,
         update_paths: SamplePath,
-        input_transform: Optional[TInputTransform] = None,
-        output_transform: Optional[TOutputTransform] = None,
+        input_transform: TInputTransform | None = None,
+        output_transform: TOutputTransform | None = None,
     ) -> None:
         r"""Initializes a MatheronPath instance.
 
@@ -83,23 +82,57 @@ class MatheronPath(PathDict):
         )
 
 
+def get_matheron_path_model(
+    model: GP, sample_shape: Size | None = None, ensemble_as_batch: bool = False
+) -> GenericDeterministicModel:
+    r"""Generates a deterministic model using a single Matheron path drawn
+    from the model's posterior.
+
+    The deterministic model evaluates the output of ``draw_matheron_paths``,
+    and reshapes it to mimic the output behavior of the model's posterior.
+
+    Args:
+        model: The model whose posterior is to be sampled.
+        sample_shape: The shape of the sample paths to be drawn, if an ensemble
+            of sample paths is desired. If this is specified, the resulting
+            deterministic model will behave as if the ``sample_shape`` is prepended
+            to the ``batch_shape`` of the model. The inputs used to evaluate
+            the model must be adjusted to match.
+        ensemble_as_batch: If True, and model is an ensemble model, the resulting
+            path model will treat the ensemble dimension as a batch dimension,
+            which means that its inputs have to contain the ensemble dimension in
+            the -3 position, i.e. ``batch_shape x ensemble_size x q x d``. This is
+            used when optimizing the paths of all members of an ensemble jointly,
+            with distinct optima for each member of the ensemble.
+
+    Returns:
+        A deterministic model that evaluates the Matheron path.
+    """
+    # Delegate to the MatheronPathModel class
+    return MatheronPathModel(
+        model=model,
+        sample_shape=sample_shape,
+        ensemble_as_batch=ensemble_as_batch,
+    )
+
+
 def draw_matheron_paths(
     model: GP,
     sample_shape: Size,
     prior_sampler: TPathwisePriorSampler = draw_kernel_feature_paths,
     update_strategy: TPathwiseUpdate = gaussian_update,
 ) -> MatheronPath:
-    r"""Generates function draws from (an approximate) Gaussian process prior.
+    r"""Generates function draws from (an approximate) Gaussian process posterior.
 
-    When evaluted, sample paths produced by this method return Tensors with dimensions
-    `sample_dims x batch_dims x [joint_dim]`, where `joint_dim` denotes the penultimate
-    dimension of the input tensor. For multioutput models, outputs are returned as the
-    final batch dimension.
+    When evaluated, sample paths produced by this method return Tensors with
+    dimensions ``sample_dims x batch_dims x [joint_dim]``, where ``joint_dim``
+    denotes the penultimate dimension of the input tensor. For multioutput
+    models, outputs are returned as the final batch dimension.
 
     Args:
         model: Gaussian process whose posterior is to be sampled.
         sample_shape: Sizes of sample dimensions.
-        prior_sample: A callable that takes a model and a sample shape and returns
+        prior_sampler: A callable that takes a model and a sample shape and returns
             a set of sample paths representing the prior.
         update_strategy: A callable that takes a model and a tensor of prior process
             values and returns a set of sample paths representing the data.
@@ -165,7 +198,7 @@ def _draw_matheron_paths_ExactGP(
 
 @DrawMatheronPaths.register((ApproximateGP, ApproximateGPyTorchModel))
 def _draw_matheron_paths_ApproximateGP(
-    model: Union[ApproximateGP, ApproximateGPyTorchModel],
+    model: ApproximateGP | ApproximateGPyTorchModel,
     *,
     sample_shape: Size,
     prior_sampler: TPathwisePriorSampler,
@@ -180,7 +213,7 @@ def _draw_matheron_paths_ApproximateGP(
     with delattr_ctx(model, "outcome_transform"):
         # Generate draws from the prior
         prior_paths = prior_sampler(model=model, sample_shape=sample_shape)
-        sample_values = prior_paths.forward(Z)  # `forward` bypasses transforms
+        sample_values = prior_paths.forward(Z)  # ``forward`` bypasses transforms
 
         # Compute pathwise updates
         update_paths = update_strategy(model=model, sample_values=sample_values)

@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-from typing import Optional, Union
-
 import torch
 from botorch.sampling.pathwise.utils import (
     TInputTransform,
@@ -23,8 +21,8 @@ from torch.nn import Module
 class FeatureMap(TransformedModuleMixin, Module):
     num_outputs: int
     batch_shape: Size
-    input_transform: Optional[TInputTransform]
-    output_transform: Optional[TOutputTransform]
+    input_transform: TInputTransform | None
+    output_transform: TOutputTransform | None
 
 
 class KernelEvaluationMap(FeatureMap):
@@ -34,8 +32,8 @@ class KernelEvaluationMap(FeatureMap):
         self,
         kernel: Kernel,
         points: Tensor,
-        input_transform: Optional[TInputTransform] = None,
-        output_transform: Optional[TOutputTransform] = None,
+        input_transform: TInputTransform | None = None,
+        output_transform: TOutputTransform | None = None,
     ) -> None:
         r"""Initializes a KernelEvaluationMap instance:
 
@@ -44,7 +42,7 @@ class KernelEvaluationMap(FeatureMap):
             feature_map(x) = output_transform(kernel(input_transform(x), points)).
 
         Args:
-            kernel: The kernel :math:`k` used to define the feature map.
+            kernel: The kernel :math:``k`` used to define the feature map.
             points: A tensor passed as the kernel's second argument.
             input_transform: An optional input transform for the module.
             output_transform: An optional output transform for the module.
@@ -62,16 +60,16 @@ class KernelEvaluationMap(FeatureMap):
         self.input_transform = input_transform
         self.output_transform = output_transform
 
-    def forward(self, x: Tensor) -> Union[Tensor, LinearOperator]:
+    def forward(self, x: Tensor) -> Tensor | LinearOperator:
         return self.kernel(x, self.points)
 
     @property
     def num_outputs(self) -> int:
         if self.output_transform is None:
-            return self.points.shape[-1]
+            return self.points.shape[-2]
 
         canary = torch.empty(
-            1, self.points.shape[-1], device=self.points.device, dtype=self.points.dtype
+            1, self.points.shape[-2], device=self.points.device, dtype=self.points.dtype
         )
         return self.output_transform(canary).shape[-1]
 
@@ -81,18 +79,18 @@ class KernelEvaluationMap(FeatureMap):
 
 
 class KernelFeatureMap(FeatureMap):
-    r"""Representation of a kernel :math:`k: \mathcal{X}^2 \to \mathbb{R}` as an
-    n-dimensional feature map :math:`\phi: \mathcal{X} \to \mathbb{R}^n` satisfying:
-    :math:`k(x, x') ≈ \phi(x)^\top \phi(x')`.
+    r"""Representation of a kernel :math:``k: \mathcal{X}^2 \to \mathbb{R}`` as an
+    n-dimensional feature map :math:``\phi: \mathcal{X} \to \mathbb{R}^n`` satisfying:
+    :math:``k(x, x') ≈ \phi(x)^\top \phi(x')``.
     """
 
     def __init__(
         self,
         kernel: Kernel,
         weight: Tensor,
-        bias: Optional[Tensor] = None,
-        input_transform: Optional[TInputTransform] = None,
-        output_transform: Optional[TOutputTransform] = None,
+        bias: Tensor | None = None,
+        input_transform: TInputTransform | None = None,
+        output_transform: TOutputTransform | None = None,
     ) -> None:
         r"""Initializes a KernelFeatureMap instance:
 
@@ -101,7 +99,7 @@ class KernelFeatureMap(FeatureMap):
             feature_map(x) = output_transform(input_transform(x)^{T} weight + bias).
 
         Args:
-            kernel: The kernel :math:`k` used to define the feature map.
+            kernel: The kernel :math:``k`` used to define the feature map.
             weight: A tensor of weights used to linearly combine the module's inputs.
             bias: A tensor of biases to be added to the linearly combined inputs.
             input_transform: An optional input transform for the module.

@@ -12,28 +12,29 @@ References
     A. Gessner, O. Kanjilal, and P. Hennig. Integrals over gaussians under
     linear domain constraints. AISTATS 2020.
 
+.. [Wu2024]
+    K. Wu, and J. Gardner. A Fast, Robust Elliptical Slice Sampling Implementation for
+    Linearly Truncated Multivariate Normal Distributions. arXiv:2407.10449. 2024.
 
 This implementation is based (with multiple changes / optimiations) on
 the following implementations based on the algorithm in [Gessner2020]_:
 - https://github.com/alpiges/LinConGauss
 - https://github.com/wjmaddox/pytorch_ess
 
+In addition, the active intervals (from which the angle is sampled) are computed using
+the improved algorithm described in [Wu2024]_:
+https://github.com/kayween/linear-ess
+
 The implementation here differentiates itself from the original implementations with:
 1) Support for fixed feature equality constraints.
 2) Support for non-standard Normal distributions.
 3) Numerical stability improvements, especially relevant for high-dimensional cases.
-
-Notably, this implementation does not rely on an adaptive `delta_theta` parameter in
-order to determine if two neighboring constraint intersection angles `theta` lead to a
-change in the feasibility of the sample. This both simplifies the implementation and
-makes it more robust to numerical imprecisions when two constraint intersection angles
-are close to each other.
+4) Support multiple Markov chains running in parallel.
 """
 
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Tuple, Union
 
 import torch
 from botorch.utils.sampling import PolytopeSampler
@@ -47,61 +48,63 @@ class LinearEllipticalSliceSampler(PolytopeSampler):
     r"""Linear Elliptical Slice Sampler.
 
     Ideas:
-    - Add batch support, broadcasting over parallel chains.
     - Optimize computations if possible, potentially with torch.compile.
     - Extend fixed features constraint to general linear equality constraints.
     """
 
     def __init__(
         self,
-        inequality_constraints: Optional[Tuple[Tensor, Tensor]] = None,
-        bounds: Optional[Tensor] = None,
-        interior_point: Optional[Tensor] = None,
-        fixed_indices: Optional[Union[List[int], Tensor]] = None,
-        mean: Optional[Tensor] = None,
-        covariance_matrix: Optional[Union[Tensor, LinearOperator]] = None,
-        covariance_root: Optional[Union[Tensor, LinearOperator]] = None,
+        inequality_constraints: tuple[Tensor, Tensor] | None = None,
+        bounds: Tensor | None = None,
+        interior_point: Tensor | None = None,
+        fixed_indices: list[int] | Tensor | None = None,
+        mean: Tensor | None = None,
+        covariance_matrix: Tensor | LinearOperator | None = None,
+        covariance_root: Tensor | LinearOperator | None = None,
         check_feasibility: bool = False,
         burnin: int = 0,
         thinning: int = 0,
+        num_chains: int = 1,
     ) -> None:
         r"""Initialize LinearEllipticalSliceSampler.
 
         Args:
-            inequality_constraints: Tensors `(A, b)` describing inequality constraints
-                 `A @ x <= b`, where `A` is an `n_ineq_con x d`-dim Tensor and `b` is
-                 an `n_ineq_con x 1`-dim Tensor, with `n_ineq_con` the number of
-                 inequalities and `d` the dimension of the sample space. If omitted,
-                 must provide `bounds` instead.
-            bounds: A `2 x d`-dim tensor of box bounds. If omitted, must provide
-                `inequality_constraints` instead.
-            interior_point: A `d x 1`-dim Tensor presenting a point in the (relative)
+            inequality_constraints: Tensors ``(A, b)`` describing inequality
+                 constraints ``A @ x <= b``, where ``A`` is an
+                 ``n_ineq_con x d``-dim Tensor and ``b`` is an
+                 ``n_ineq_con x 1``-dim Tensor, with ``n_ineq_con`` the number of
+                 inequalities and ``d`` the dimension of the sample space. If omitted,
+                 must provide ``bounds`` instead.
+            bounds: A ``2 x d``-dim tensor of box bounds. If omitted, must provide
+                ``inequality_constraints`` instead.
+            interior_point: A ``d x 1``-dim Tensor presenting a point in the (relative)
                 interior of the polytope. If omitted, an interior point is determined
                 automatically by solving a Linear Program. Note: It is crucial that
                 the point lie in the interior of the feasible set (rather than on the
                 boundary), otherwise the sampler will produce invalid samples.
-            fixed_indices: Integer list or `d`-dim Tensor representing the indices of
-                dimensions that are constrained to be fixed to the values specified in
-                the `interior_point`, which is required to be passed in conjunction with
-                `fixed_indices`.
-            mean: The `d x 1`-dim mean of the MVN distribution (if omitted, use zero).
-            covariance_matrix: The `d x d`-dim covariance matrix of the MVN
+            fixed_indices: Integer list or ``d``-dim Tensor representing the indices
+                of dimensions that are constrained to be fixed to the values specified
+                in the ``interior_point``, which is required to be passed in
+                conjunction with ``fixed_indices``.
+            mean: The ``d x 1``-dim mean of the MVN distribution (if omitted, use zero).
+            covariance_matrix: The ``d x d``-dim covariance matrix of the MVN
                 distribution (if omitted, use the identity).
-            covariance_root: A `d x d`-dim root of the covariance matrix such that
+            covariance_root: A ``d x d``-dim root of the covariance matrix such that
                 covariance_root @ covariance_root.T = covariance_matrix. NOTE: This
                 matrix is assumed to be lower triangular. covariance_root can only be
                 passed in conjunction with fixed_indices if covariance_root is a
                 DiagLinearOperator. Otherwise the factorization would need to be re-
-                computed, as we need to solve in `standardize`.
+                computed, as we need to solve in ``standardize``.
             check_feasibility: If True, raise an error if the sampling results in an
                 infeasible sample. This creates some overhead and so is switched off
                 by default.
             burnin: Number of samples to generate upon initialization to warm up the
                 sampler.
-            thinning: Number of samples to skip before returning a sample in `draw`.
+            thinning: Number of samples to skip before returning a sample in ``draw``.
+            num_chains: Number of Markov chains to run in parallel.
 
-        This sampler samples from a multivariante Normal `N(mean, covariance_matrix)`
-        subject to linear domain constraints `A x <= b` (intersected with box bounds,
+        This sampler samples from a multivariate Normal ``N(mean, covariance_matrix)``
+        subject to linear domain constraints ``A x <= b`` (intersected with box bounds,
         if provided).
         """
         if interior_point is not None and interior_point.ndim == 1:
@@ -158,10 +161,17 @@ class LinearEllipticalSliceSampler(PolytopeSampler):
         self._x = self.x0.clone()
         self._z = self._transform(self._x)
 
+        # Expand the shape to (d, num_chains) for running parallel Markov chains.
+        if num_chains > 1:
+            self._z = self._z.expand(-1, num_chains).clone()
+
         # We will need the following repeatedly, let's allocate them once
-        self._zero = torch.zeros(1, **tkwargs)
-        self._nan = torch.tensor(float("nan"), **tkwargs)
-        self._full_angular_range = torch.tensor([0.0, _twopi], **tkwargs)
+        self.zeros = torch.zeros((num_chains, 1), **tkwargs)
+        self.ones = torch.ones((num_chains, 1), **tkwargs)
+        self.indices_batch = torch.arange(
+            num_chains, dtype=torch.int64, device=tkwargs["device"]
+        )
+
         self.check_feasibility = check_feasibility
         self._lifetime_samples = 0
         if burnin > 0:
@@ -173,21 +183,22 @@ class LinearEllipticalSliceSampler(PolytopeSampler):
         self,
         A: Tensor,
         b: Tensor,
-        interior_point: Optional[Tensor],
-        fixed_indices: Union[List[int], Tensor],
-        mean: Optional[Tensor],
-        covariance_matrix: Optional[Tensor],
-        covariance_root: Optional[Tensor],
-    ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
+        interior_point: Tensor | None,
+        fixed_indices: list[int] | Tensor,
+        mean: Tensor | None,
+        covariance_matrix: Tensor | None,
+        covariance_root: Tensor | None,
+    ) -> tuple[Tensor | None, Tensor | None]:
         """Modifies the constraint system (A, b) due to fixed indices and assigns
-        the modified constraints system to `self._Az`, `self._bz`. NOTE: Needs to be
-        called prior to `self._standardization_initialization` in the constructor.
+        the modified constraints system to ``self._Az``, ``self._bz``. NOTE: Needs to be
+        called prior to ``self._standardization_initialization`` in the constructor.
         covariance_root and fixed_indices can both not be None only if covariance_root
         is a DiagLinearOperator. Otherwise, the covariance matrix would need to be
         refactorized.
 
         Returns:
-            Tuple of `mean` and `covariance_matrix` tensors of the non-fixed dimensions.
+            Tuple of ``mean`` and ``covariance_matrix`` tensors of the non-fixed
+            dimensions.
         """
         if interior_point is None:
             raise ValueError(
@@ -245,14 +256,14 @@ class LinearEllipticalSliceSampler(PolytopeSampler):
         """The total number of samples generated by the sampler during its lifetime."""
         return self._lifetime_samples
 
-    def draw(self, n: int = 1) -> Tuple[Tensor, Tensor]:
+    def draw(self, n: int = 1) -> Tensor:
         r"""Draw samples.
 
         Args:
             n: The number of samples.
 
         Returns:
-            A `n x d`-dim tensor of `n` samples.
+            A ``(n * num_chains) x d``-dim tensor of ``n * num_chains`` samples.
         """
         samples = []
         for _ in range(n):
@@ -265,16 +276,17 @@ class LinearEllipticalSliceSampler(PolytopeSampler):
         r"""Take a step, return the new sample, update the internal state.
 
         Returns:
-            A `d x 1`-dim sample from the domain.
+            A ``d x num_chains``-dim tensor, where each column is a sample from a Markov
+            chain.
         """
         nu = torch.randn_like(self._z)
         theta = self._draw_angle(nu=nu)
-        z = self._get_cart_coords(nu=nu, theta=theta)
-        self._z[:] = z
-        x = self._untransform(z)
-        self._x[:] = x
+
+        self._z = z = self._get_cart_coords(nu=nu, theta=theta)
+        self._x = x = self._untransform(z)
+
         self._lifetime_samples += 1
-        if self.check_feasibility and (not self._is_feasible(self._x)):
+        if self.check_feasibility and (not self._is_feasible(self._x).all()):
             Axmb = self.A @ self._x - self.b
             violated_indices = Axmb > 0
             raise RuntimeError(
@@ -289,171 +301,137 @@ class LinearEllipticalSliceSampler(PolytopeSampler):
         r"""Draw the rotation angle.
 
         Args:
-            nu: A `d x 1`-dim tensor (the "new" direction, drawn from N(0, I)).
+            nu: A ``d x num_chains``-dim tensor (the "new" direction, drawn from
+                N(0, I)).
 
         Returns:
-            A `1`-dim Tensor containing the rotation angle (radians).
+            A ``num_chains``-dim Tensor containing the rotation angle (radians).
         """
-        rot_angle, rot_slices = self._find_rotated_intersections(nu)
-        rot_lengths = rot_slices[:, 1] - rot_slices[:, 0]
-        cum_lengths = torch.cumsum(rot_lengths, dim=0)
-        cum_lengths = torch.cat((self._zero, cum_lengths), dim=0)
-        rnd_angle = cum_lengths[-1] * torch.rand(
-            1, device=cum_lengths.device, dtype=cum_lengths.dtype
+        left, right = self._find_active_intersection_angles(nu)
+        left, right = self._trim_intervals(left, right)
+
+        # If left[i, j] <= right[i, j], then [left[i, j], right[i, j]] is an active
+        # interval. On the other hand, if left[i, j] > right[i, j], then they are both
+        # dummy variables and should be discarded. Thus, we clamp their difference so
+        # that they do not contribute to the cumulative length.
+        csum = right.sub(left).clamp(min=0.0).cumsum(dim=-1)
+
+        u = csum[:, -1] * torch.rand(
+            right.size(-2), dtype=right.dtype, device=right.device
         )
-        idx = torch.searchsorted(cum_lengths, rnd_angle) - 1
-        return (rot_slices[idx, 0] + rnd_angle + rot_angle) - cum_lengths[idx]
+
+        # The returned index i satisfies csum[i - 1] < u <= csum[i]
+        idx = torch.searchsorted(csum, u.unsqueeze(-1)).squeeze(-1)
+
+        # Do a zero padding so that padded_csum[i] = csum[i - 1]
+        padded_csum = torch.cat([self.zeros, csum], dim=-1)
+
+        return u - padded_csum[self.indices_batch, idx] + left[self.indices_batch, idx]
 
     def _get_cart_coords(self, nu: Tensor, theta: Tensor) -> Tensor:
-        r"""Determine location on ellipsoid in cartesian coordinates.
+        r"""Determine location on the ellipse in Cartesian coordinates.
 
         Args:
-            nu: A `d x 1`-dim tensor (the "new" direction, drawn from N(0, I)).
-            theta: A `k`-dim tensor of angles.
+            nu: A ``d x num_chains``-dim tensor (the "new" direction, drawn from
+                N(0, I)).
+            theta: A ``num_chains``-dim tensor of angles.
 
         Returns:
-            A `d x k`-dim tensor of samples from the domain in cartesian coordinates.
+            A ``d x num_chains``-dim tensor of samples from the domain in Cartesian
+            coordinates.
         """
         return self._z * torch.cos(theta) + nu * torch.sin(theta)
 
-    def _find_rotated_intersections(self, nu: Tensor) -> Tuple[Tensor, Tensor]:
-        r"""Finds rotated intersections.
+    def _trim_intervals(self, left: Tensor, right: Tensor) -> tuple[Tensor, Tensor]:
+        """Trim the intervals by a small positive constant. This encourages the Markov
+        chain to stay in the interior of the domain.
+        """
+        gap = torch.clamp(right - left, min=0.0)
+        eps = gap.mul(0.25).clamp(max=1e-6 if gap.dtype == torch.float32 else 1e-12)
 
-        Rotates the intersections by the rotation angle and makes sure that all
-        angles lie in [0, 2*pi].
+        return left + eps, right - eps
+
+    def _find_active_intersection_angles(self, nu: Tensor) -> tuple[Tensor, Tensor]:
+        """Construct the active intersection angles.
 
         Args:
-            nu: A `d x 1`-dim tensor (the "new" direction, drawn from N(0, I)).
+            nu: A ``d x num_chains``-dim tensor (the "new" direction, drawn from
+                N(0, I)).
 
         Returns:
-            A two-tuple containing rotation angle (scalar) and a
-            `num_active / 2 x 2`-dim tensor of shifted angles.
+            A tuple (left, right) of two tensors of size ``num_chains x m`` representing
+            the active intersection angles. For the i-th Markov chain and the j-th
+            constraint, a pair of angles left[i, j] and right[i, j] is active if and
+            only if left[i, j] <= right[i, j]. If left[i, j] > right[i, j], they are
+            inactive and should be ignored.
         """
-        slices = self._find_active_intersections(nu)
-        rot_angle = slices[0]
-        slices = (slices - rot_angle).reshape(-1, 2)
-        # Ensuring that we don't sample within numerical precision of the boundaries
-        # due to resulting instabilities in the constraint satisfaction.
-        eps = 1e-6 if slices.dtype == torch.float32 else 1e-12
-        eps = torch.tensor(eps, dtype=slices.dtype, device=slices.device)
-        eps = eps.minimum(slices.diff(dim=-1).abs() / 4)
-        slices = slices + torch.cat((eps, -eps), dim=-1)
-        # NOTE: The remainder call relies on the epsilon contraction, since the
-        # remainder of_twopi divided by _twopi is zero, not _twopi.
-        return rot_angle, slices.remainder(_twopi)
+        alpha, beta = self._find_intersection_angles(nu)
 
-    def _find_active_intersections(self, nu: Tensor) -> Tensor:
-        """
-        Find angles of those intersections that are at the boundary of the integration
-        domain by adding and subtracting a small angle and evaluating on the ellipse
-        to see if we are on the boundary of the integration domain.
+        # It's easier to put ``num_chains`` as the first dimension,
+        # because ``torch.searchsorted`` only supports searching in the last dimension
+        alpha, beta = alpha.T, beta.T
+
+        srted, indices = torch.sort(alpha, descending=False)
+        cummax = beta[self.indices_batch.unsqueeze(-1), indices].cummax(dim=-1).values
+
+        srted = torch.cat([srted, self.ones * 2 * math.pi], dim=-1)
+        cummax = torch.cat([self.zeros, cummax], dim=-1)
+
+        return cummax, srted
+
+    def _find_intersection_angles(self, nu: Tensor) -> tuple[Tensor, Tensor]:
+        """Compute all 2 * m intersections of the ellipse and the domain, where
+        ``m = n_ineq_con`` is the number of inequality constraints defining the domain.
+        If the i-th linear inequality constraint has no intersection with the ellipse,
+        we will create two dummy intersection angles alpha_i = beta_i = 0.
 
         Args:
-            nu: A `d x 1`-dim tensor (the "new" direction, drawn from N(0, I)).
+            nu: A ``d x num_chains``-dim tensor (the "new" direction, drawn from
+                N(0, I)).
 
         Returns:
-            A `num_active`-dim tensor containing the angles of active intersection in
-            increasing order so that activation happens in positive direction. If a
-            slice crosses `theta=0`, the first angle is appended at the end of the
-            tensor. Every element of the returned tensor defines a slice for elliptical
-            slice sampling.
+            A tuple of two tensors with the same size ``m x num_chains``. The first
+            tensor represents the smaller intersection angles. The second tensor
+            represents the larger intersection angles.
         """
-        theta = self._find_intersection_angles(nu)
-        theta_active, delta_active = self._active_theta_and_delta(
-            nu=nu,
-            theta=theta,
-        )
-        if theta_active.numel() == 0:
-            theta_active = self._full_angular_range
-            # TODO: What about `self.ellipse_in_domain = False` in the original code?
-        elif delta_active[0] == -1:  # ensuring that the first interval is feasible
+        p = self._Az @ self._z
+        q = self._Az @ nu
 
-            theta_active = torch.cat((theta_active[1:], theta_active[:1]))
+        radius = torch.sqrt(p**2 + q**2)
 
-        return theta_active.view(-1)
+        ratio = self._bz / radius
 
-    def _find_intersection_angles(self, nu: Tensor) -> Tensor:
-        """Compute all of the up to 2*n_ineq_con intersections of the ellipse
-        and the linear constraints.
+        has_solution = ratio < 1.0
 
-        For background, see equation (2) in
-        http://proceedings.mlr.press/v108/gessner20a/gessner20a.pdf
+        arccos = torch.arccos(ratio)
+        arccos[~has_solution] = 0.0
+        arctan = torch.arctan2(q, p)
 
-        Args:
-            nu: A `d x 1`-dim tensor (the "new" direction, drawn from N(0, I)).
+        theta1 = arctan + arccos
+        theta2 = arctan - arccos
 
-        Returns:
-            An `M`-dim tensor, where `M <= 2 * n_ineq_con` (with `M = n_ineq_con`
-            if all intermediate computations yield finite numbers).
-        """
-        # Compared to the implementation in https://github.com/alpiges/LinConGauss
-        # we need to flip the sign of A b/c the original algorithm considers
-        # A @ x + b >= 0 feasible, whereas we consider A @ x - b <= 0 feasible.
-        g1 = -self._Az @ self._z
-        g2 = -self._Az @ nu
-        r = torch.sqrt(g1**2 + g2**2)
-        phi = 2 * torch.atan(g2 / (r + g1)).squeeze()
+        # translate every angle to [0, 2 * pi]
+        theta1 = theta1 + theta1.lt(0.0) * _twopi
+        theta2 = theta2 + theta2.lt(0.0) * _twopi
 
-        arg = -(self._bz / r).squeeze()
-        # Write NaNs if there is no intersection
-        arg = torch.where(torch.absolute(arg) <= 1, arg, self._nan)
-        # Two solutions per linear constraint, shape of theta: (n_ineq_con, 2)
-        acos_arg = torch.arccos(arg)
-        theta = torch.stack((phi + acos_arg, phi - acos_arg), dim=-1)
-        theta = theta[torch.isfinite(theta)]  # shape: `n_ineq_con - num_not_finite`
-        theta = torch.where(theta < 0, theta + _twopi, theta)  # in [0, 2*pi]
-        return torch.sort(theta).values
+        alpha = torch.minimum(theta1, theta2)
+        beta = torch.maximum(theta1, theta2)
 
-    def _active_theta_and_delta(self, nu: Tensor, theta: Tensor) -> Tensor:
-        r"""Determine active indices.
-
-        Args:
-            nu: A `d x 1`-dim tensor (the "new" direction, drawn from N(0, I)).
-            theta: A sorted `M`-dim tensor of intersection angles in [0, 2pi].
-
-        Returns:
-            A tuple of Tensors of active constraint intersection angles `theta_active`,
-            and the change in the feasibility of the points on the ellipse on the left
-            and right of the active intersection angles `delta_active`. `delta_active`
-            is is negative if decreasing the angle renders the sample feasible, and
-            positive if increasing the angle renders the sample feasible.
-        """
-        # In order to determine if an angle that gives rise to an intersection with a
-        # constraint boundary leads to a change in the feasibility of the solution,
-        # we evaluate the constraints on the midpoint of the intersection angles.
-        # This gets rid of the `delta_theta` parameter in the original implementation,
-        # which cannot be set universally since it can be both 1) too large, when
-        # the distance in adjacent intersection angles is small, and 2) too small,
-        # when it approaches the numerical precision limit.
-        # The implementation below solves both problems and gets rid of the parameter.
-        if len(theta) < 2:  # if we have no or only a tangential intersection
-            theta_active = torch.tensor([], dtype=theta.dtype, device=theta.device)
-            delta_active = torch.tensor([], dtype=int, device=theta.device)
-            return theta_active, delta_active
-        theta_mid = (theta[:-1] + theta[1:]) / 2  # midpoints of intersection angles
-        last_mid = (theta[:1] + theta[-1:] + _twopi) / 2
-        last_mid = last_mid.where(last_mid < _twopi, last_mid - _twopi)
-        theta_mid = torch.cat((last_mid, theta_mid, last_mid), dim=0)
-        samples_mid = self._get_cart_coords(nu=nu, theta=theta_mid)
-        delta_feasibility = (
-            self._is_feasible(samples_mid, transformed=True).to(dtype=int).diff()
-        )
-        active_indices = delta_feasibility.nonzero()
-        return theta[active_indices], delta_feasibility[active_indices]
+        return alpha, beta
 
     def _is_feasible(self, points: Tensor, transformed: bool = False) -> Tensor:
-        r"""Returns a Boolean tensor indicating whether the `points` are feasible,
-        i.e. they satisfy `A @ points <= b`, where `(A, b)` are the tensors passed
-        as the `inequality_constraints` to the constructor of the sampler.
+        r"""Returns a Boolean tensor indicating whether the ``points`` are feasible,
+        i.e. they satisfy ``A @ points <= b``, where ``(A, b)`` are the tensors passed
+        as the ``inequality_constraints`` to the constructor of the sampler.
 
         Args:
-            points: A `d x M`-dim tensor of points.
+            points: A ``d x M``-dim tensor of points.
             transformed: Wether points are assumed to be transformed by a change of
                 basis, which means feasibility should be computed based on the
                 transformed constraint system (_Az, _bz), instead of (A, b).
 
         Returns:
-            An `M`-dim binary tensor where `True` indicates that the associated
+            An ``M``-dim binary tensor where ``True`` indicates that the associated
             point is feasible.
         """
         A, b = (self._Az, self._bz) if transformed else (self.A, self.b)
@@ -464,10 +442,10 @@ class LinearEllipticalSliceSampler(PolytopeSampler):
         constrained with the modified system constraints (self._Az, self._bz).
 
         Args:
-            x: The input tensor to be transformed, usually `d x 1`-dimensional.
+            x: The input tensor to be transformed, usually ``d x 1``-dimensional.
 
         Returns:
-            A `d x 1`-dimensional tensor of transformed values subject to the modified
+            A ``d x 1``-dimensional tensor of transformed values subject to the modified
             system of constraints.
         """
         if self._not_fixed is not None:
@@ -475,14 +453,16 @@ class LinearEllipticalSliceSampler(PolytopeSampler):
         return self._standardize(x)
 
     def _untransform(self, z: Tensor) -> Tensor:
-        """The inverse transform of the `_transform`, i.e. maps `z` back to the original
-        space where it is subject to the original constraint system (self.A, self.b).
+        """The inverse transform of the ``_transform``, i.e. maps ``z`` back to the
+        original space where it is subject to the original constraint system
+        (self.A, self.b).
 
         Args:
-            z: The transformed tensor to be un-transformed, usually `d x 1`-dimensional.
+            z: The transformed tensor to be un-transformed, usually
+                ``d x 1``-dimensional.
 
         Returns:
-            A `d x 1`-dimensional tensor of un-transformed values subject to the
+            A ``d x 1``-dimensional tensor of un-transformed values subject to the
             original system of constraints.
         """
         if self._is_fixed is None:
@@ -493,8 +473,8 @@ class LinearEllipticalSliceSampler(PolytopeSampler):
             return x
 
     def _standardize(self, x: Tensor) -> Tensor:
-        """_transform helper standardizing the input `x`, which is assumed to be a
-        `d x 1`-dim Tensor, or a `len(self._not_fixed) x 1`-dim if there are fixed
+        """_transform helper standardizing the input ``x``, which is assumed to be a
+        ``d x 1``-dim Tensor, or a ``len(self._not_fixed) x 1``-dim if there are fixed
         indices.
         """
         z = x
@@ -507,9 +487,9 @@ class LinearEllipticalSliceSampler(PolytopeSampler):
         return z
 
     def _unstandardize(self, z: Tensor) -> Tensor:
-        """_untransform helper un-standardizing the input `z`, which is assumed to be a
-        `d x 1`-dim Tensor, or a `len(self._not_fixed) x 1`-dim if there are fixed
-        indices.
+        """_untransform helper un-standardizing the input ``z``, which is assumed to
+        be a ``d x 1``-dim Tensor, or a ``len(self._not_fixed) x 1``-dim if there are
+        fixed indices.
         """
         x = z
         if self._covariance_root is not None:
@@ -520,13 +500,13 @@ class LinearEllipticalSliceSampler(PolytopeSampler):
 
 
 def get_index_tensors(
-    fixed_indices: Union[List[int], Tensor], d: int
-) -> Tuple[Tensor, Tensor]:
-    """Converts `fixed_indices` to a `d`-dim integral Tensor that is True at indices
-    that are contained in `fixed_indices` and False otherwise.
+    fixed_indices: list[int] | Tensor, d: int
+) -> tuple[Tensor, Tensor]:
+    """Converts ``fixed_indices`` to a ``d``-dim integral Tensor that is True at indices
+    that are contained in ``fixed_indices`` and False otherwise.
 
     Args:
-        fixed_indices: A list or Tensoro of integer indices to fix.
+        fixed_indices: A list or Tensor of integer indices to fix.
         d: The dimensionality of the Tensors to be indexed.
 
     Returns:

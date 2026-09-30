@@ -6,8 +6,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from inspect import getsource, getsourcefile
-from typing import Any, Callable, Optional, Tuple, Type
+from typing import Any
 
 from multipledispatch.dispatcher import (
     Dispatcher as MDDispatcher,
@@ -16,48 +17,48 @@ from multipledispatch.dispatcher import (
 )
 
 
-def type_bypassing_encoder(arg: Any) -> Type:
+def type_bypassing_encoder(arg: Any) -> type:
     # Allow type variables to be passed as pre-encoded arguments
     return arg if isinstance(arg, type) else type(arg)
 
 
 class Dispatcher(MDDispatcher):
     r"""Clearing house for multiple dispatch functionality. This class extends
-    `<multipledispatch.Dispatcher>` by: (i) generalizing the argument encoding
-    convention during method lookup, (ii) implementing `__getitem__` as a dedicated
+    ``<multipledispatch.Dispatcher>`` by: (i) generalizing the argument encoding
+    convention during method lookup, (ii) implementing ``__getitem__`` as a dedicated
     method lookup function.
     """
 
     def __init__(
         self,
         name: str,
-        doc: Optional[str] = None,
-        encoder: Callable[Any, Type] = type,
+        doc: str | None = None,
+        encoder: Callable[Any, type] = type,
     ) -> None:
         """
         Args:
-            name: A string identifier for the `Dispatcher` instance.
+            name: A string identifier for the ``Dispatcher`` instance.
             doc: A docstring for the multiply dispatched method(s).
             encoder: A callable that individually transforms the arguments passed
                 at runtime in order to construct the key used for method lookup as
-                `tuple(map(encoder, args))`. Defaults to `type`.
+                ``tuple(map(encoder, args))``. Defaults to ``type``.
         """
         super().__init__(name=name, doc=doc)
         self._encoder = encoder
 
     def __getitem__(
         self,
-        args: Optional[Any] = None,
-        types: Optional[Tuple[Type]] = None,
+        args: Any | None = None,
+        types: tuple[type] | None = None,
     ) -> Callable:
         r"""Method lookup.
 
         Args:
             args: A set of arguments that act as identifiers for a stored method.
-            types: A tuple of types that encodes `args`.
+            types: A tuple of types that encodes ``args``.
 
         Returns:
-            A callable corresponding to the given `args` or `types`.
+            A callable corresponding to the given ``args`` or ``types``.
         """
         if types is None:
             if args is None:
@@ -84,7 +85,7 @@ class Dispatcher(MDDispatcher):
             kwargs: Optional keyword arguments passed to the retrieved method.
 
         Returns:
-            The result of evaluating `func(*args, **kwargs)`, where `func` is
+            The result of evaluating ``func(*args, **kwargs)``, where ``func`` is
             the function obtained via method lookup.
         """
         types = self.encode_args(args)
@@ -106,7 +107,7 @@ class Dispatcher(MDDispatcher):
                 "found, but none completed successfully"
             )
 
-    def dispatch(self, *types: Type) -> Callable:
+    def dispatch(self, *types: type) -> Callable:
         r"""Method lookup strategy. Checks for an exact match before traversing
         the set of registered methods according to the current ordering.
 
@@ -124,7 +125,7 @@ class Dispatcher(MDDispatcher):
         except StopIteration:
             return None
 
-    def encode_args(self, args: Any) -> Tuple[Type]:
+    def encode_args(self, args: Any) -> tuple[type]:
         r"""Converts arguments into a tuple of types used during method lookup."""
         return tuple(map(self.encoder, args if isinstance(args, tuple) else (args,)))
 
@@ -148,5 +149,5 @@ class Dispatcher(MDDispatcher):
         print(self._source(*args))
 
     @property
-    def encoder(self) -> Callable[Any, Type]:
+    def encoder(self) -> Callable[Any, type]:
         return self._encoder

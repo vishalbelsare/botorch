@@ -37,16 +37,14 @@ Monte-Carlo Acquisition Function API
 .. autoclass:: MCAcquisitionFunction
     :members:
 
-Multi-Objective Analytic Acquisition Function API
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-.. currentmodule:: botorch.acquisition.multi_objective.analytic
-.. autoclass:: MultiObjectiveAnalyticAcquisitionFunction
+Multi-Output Acquisition Function API
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: botorch.acquisition.multioutput_acquisition
     :members:
 
-Multi-Objective Monte-Carlo Acquisition Function API
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-.. currentmodule:: botorch.acquisition.multi_objective.monte_carlo
-.. autoclass:: MultiObjectiveMCAcquisitionFunction
+Base Classes for Multi-Objective Acquisition Function API
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: botorch.acquisition.multi_objective.base
     :members:
 
 
@@ -72,7 +70,6 @@ Multi-Objective Analytic Acquisition Functions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: botorch.acquisition.multi_objective.analytic
     :members:
-    :exclude-members: MultiObjectiveAnalyticAcquisitionFunction
 
 Multi-Objective Hypervolume Knowledge Gradient Acquisition Functions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -93,7 +90,6 @@ Multi-Objective Monte-Carlo Acquisition Functions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: botorch.acquisition.multi_objective.monte_carlo
     :members:
-    :exclude-members: MultiObjectiveMCAcquisitionFunction
 
 .. automodule:: botorch.acquisition.multi_objective.logei
     :members:
@@ -143,11 +139,15 @@ Active Learning Acquisition Functions
 .. automodule:: botorch.acquisition.active_learning
     :members:
 
+Bayesian Active Learning Acquisition Functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: botorch.acquisition.bayesian_active_learning
+    :members:
+
 Preference Acquisition Functions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: botorch.acquisition.preference
     :members:
-
 
 Objectives and Cost-Aware Utilities
 -------------------------------------------
@@ -170,6 +170,11 @@ Cost-Aware Utility
 Risk Measures
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: botorch.acquisition.risk_measures
+    :members:
+
+Thompson Sampling
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: botorch.acquisition.thompson_sampling
     :members:
 
 Multi-Output Risk Measures

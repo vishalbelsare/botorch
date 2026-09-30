@@ -17,17 +17,31 @@ from typing import Dict, Optional, Tuple
 from memory_profiler import memory_usage
 
 
-IGNORE_ALWAYS = set()  # ignored in smoke tests and full runs
-RUN_IF_SMOKE_TEST_IGNORE_IF_STANDARD = set()  # only used in smoke tests
+# Ignored in smoke tests and full runs
+IGNORE_ALWAYS = {
+    "optimization_issue_diagnostics.ipynb",
+}
+# Run in smoke-test mode only; skipped in standard/full runs (too slow at full
+# scale for the nightly cron).
+RUN_IF_SMOKE_TEST_IGNORE_IF_STANDARD = {
+    "robot.ipynb",
+    "empirical_gaussian_processes.ipynb",
+}
 
 
 def run_script(
-    tutorial: Path, timeout_minutes: int, env: Optional[Dict[str, str]] = None
+    tutorial: Path,
+    timeout_minutes: int,
+    env: Optional[Dict[str, str]] = None,
+    save_outputs: bool = False,
 ) -> None:
     if env is not None:
         env = {**os.environ, **env}
+    # If save_outputs is True, save the executed notebook back to the same file.
+    # Otherwise, pipe to "|" to discard the output (for testing purposes).
+    output_path = str(tutorial) if save_outputs else "|"
     run_out = subprocess.run(
-        ["papermill", tutorial, "|"],
+        ["papermill", tutorial, output_path],
         capture_output=True,
         text=True,
         env=env,
@@ -37,19 +51,28 @@ def run_script(
 
 
 def run_tutorial(
-    tutorial: Path, smoke_test: bool = False
+    tutorial: Path, smoke_test: bool = False, save_outputs: bool = False
 ) -> Tuple[Optional[str], Dict[str, float]]:
     """
     Runs the tutorial in a subprocess, catches any raised errors and returns
     them as a string, and returns runtime and memory information as a dict.
     """
+    if smoke_test and save_outputs:
+        raise ValueError(
+            "Cannot use both smoke_test and save_outputs. "
+            "Saving outputs from smoke tests is not supported."
+        )
     timeout_minutes = 5 if smoke_test else 30
     tic = time.monotonic()
     print(f"Running tutorial {tutorial.name}.")
     env = {"SMOKE_TEST": "True"} if smoke_test else None
     try:
         mem_usage, run_out = memory_usage(
-            (run_script, (tutorial, timeout_minutes), {"env": env}),
+            (
+                run_script,
+                (tutorial, timeout_minutes),
+                {"env": env, "save_outputs": save_outputs},
+            ),
             retval=True,
             include_children=True,
         )
@@ -88,10 +111,22 @@ def run_tutorials(
     include_ignored: bool = False,
     smoke_test: bool = False,
     name: Optional[str] = None,
+    save_outputs: bool = False,
 ) -> None:
-    """Run each tutorial and print statements on its runtime and memory usage."""
+    """Run each tutorial and print statements on its runtime and memory usage.
+
+    Args:
+        repo_dir: Path to the botorch repository root directory.
+        include_ignored: If True, run all tutorials including ignored ones.
+        smoke_test: If True, run in smoke test mode (faster, for testing).
+        name: If provided, only run the tutorial with this name.
+        save_outputs: If True, save executed notebook outputs back to the source files.
+            This is useful for keeping tutorial outputs up to date on the website.
+    """
     mode = "smoke test" if smoke_test else "standard"
     print(f"Running tutorial(s) in {mode} mode.")
+    if save_outputs:
+        print("Saving outputs back to notebook files.")
     if not smoke_test:
         print("This may take a long time...")
     tutorial_dir = Path(repo_dir).joinpath("tutorials")
@@ -103,9 +138,7 @@ def run_tutorials(
         else IGNORE_ALWAYS | RUN_IF_SMOKE_TEST_IGNORE_IF_STANDARD
     )
 
-    tutorials = sorted(
-        t for t in tutorial_dir.iterdir() if t.is_file and t.suffix == ".ipynb"
-    )
+    tutorials = sorted(t for t in tutorial_dir.rglob("*.ipynb") if t.is_file())
     if name is not None:
         tutorials = [t for t in tutorials if t.name == name]
         if len(tutorials) == 0:
@@ -116,7 +149,9 @@ def run_tutorials(
             print(f"Ignoring tutorial {tutorial.name}.")
             continue
         num_runs += 1
-        error, performance_info = run_tutorial(tutorial, smoke_test=smoke_test)
+        error, performance_info = run_tutorial(
+            tutorial, smoke_test=smoke_test, save_outputs=save_outputs
+        )
         if error:
             num_errors += 1
             print(error)
@@ -154,10 +189,17 @@ if __name__ == "__main__":
         ".ipynb extension. If the tutorial is on the ignore list, you still need "
         "to specify --include-ignored.",
     )
+    parser.add_argument(
+        "--save-outputs",
+        action="store_true",
+        help="Save executed notebook outputs back to the source files. "
+        "This is useful for keeping tutorial outputs up to date on the website.",
+    )
     args = parser.parse_args()
     run_tutorials(
         repo_dir=args.path,
         include_ignored=args.include_ignored,
         smoke_test=args.smoke,
         name=args.name,
+        save_outputs=args.save_outputs,
     )

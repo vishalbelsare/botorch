@@ -9,15 +9,18 @@ import math
 import warnings
 
 import torch
-
 from botorch import fit_gpytorch_mll
 from botorch.exceptions import InputDataError, OptimizationWarning
 from botorch.models import SingleTaskGP
 from botorch.models.transforms import Normalize, Standardize
+from botorch.models.utils.gpytorch_modules import (
+    get_gaussian_likelihood_with_gamma_prior,
+    get_matern_kernel_with_gamma_prior,
+)
 from botorch.posteriors import GPyTorchPosterior
 from botorch.sampling import SobolQMCNormalSampler
 from botorch.utils.test_helpers import get_pvar_expected
-from botorch.utils.testing import _get_random_data, BotorchTestCase
+from botorch.utils.testing import BotorchTestCase, get_random_data
 from botorch_community.models.gp_regression_multisource import (
     _get_reliable_observations,
     get_random_x_for_agp,
@@ -65,8 +68,16 @@ class TestAugmentedSingleTaskGP(BotorchTestCase):
             "train_Yvar": torch.full_like(train_Y, 0.01) if train_Yvar else None,
             "outcome_transform": outcome_transform,
             "input_transform": input_transform,
+            "covar_module": get_matern_kernel_with_gamma_prior(
+                ard_num_dims=train_X.shape[-1] - 1
+            ),
+            "likelihood": (
+                None if train_Yvar else get_gaussian_likelihood_with_gamma_prior()
+            ),
         }
-        model = SingleTaskAugmentedGP(**model_kwargs, **extra_model_kwargs)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=OptimizationWarning)
+            model = SingleTaskAugmentedGP(**model_kwargs, **extra_model_kwargs)
         return model, model_kwargs
 
     def test_data_init(self):
@@ -109,16 +120,28 @@ class TestAugmentedSingleTaskGP(BotorchTestCase):
         true_y = torch.sin(x).reshape(-1, 1)
         y = torch.cos(x).reshape(-1, 1)
 
-        model0 = SingleTaskGP(x, true_y)
-        model1 = SingleTaskGP(x, y)
+        model0 = SingleTaskGP(
+            x,
+            true_y,
+            covar_module=get_matern_kernel_with_gamma_prior(x.shape[-1]),
+            likelihood=get_gaussian_likelihood_with_gamma_prior(),
+            outcome_transform=None,
+        )
+        model1 = SingleTaskGP(
+            x,
+            y,
+            covar_module=get_matern_kernel_with_gamma_prior(x.shape[-1]),
+            likelihood=get_gaussian_likelihood_with_gamma_prior(),
+            outcome_transform=None,
+        )
 
         res = _get_reliable_observations(model0, model1, x)
         true_res = torch.cat([torch.arange(0, 5, 1), torch.arange(9, 15, 1)]).int()
         self.assertListEqual(res.tolist(), true_res.tolist())
 
     def test_gp(self):
-        bounds = torch.tensor([[-1.0], [1.0]])
         d = 5
+        bounds = torch.stack((torch.full((d - 1,), -1), torch.ones(d - 1)))
         for batch_shape, dtype, use_octf, use_intf, train_Yvar in itertools.product(
             (torch.Size(), torch.Size([2])),
             (torch.float, torch.double),
@@ -129,7 +152,7 @@ class TestAugmentedSingleTaskGP(BotorchTestCase):
             tkwargs = {"device": self.device, "dtype": dtype}
             octf = Standardize(m=1, batch_shape=torch.Size()) if use_octf else None
             intf = (
-                Normalize(d=1, bounds=bounds.to(**tkwargs), transform_on_train=True)
+                Normalize(d=d - 1, bounds=bounds.to(**tkwargs), transform_on_train=True)
                 if use_intf
                 else None
             )
@@ -233,7 +256,7 @@ class TestAugmentedSingleTaskGP(BotorchTestCase):
             # test condition_on_observations
             fant_shape = torch.Size([2])
             # fantasize at different input points
-            X_fant, Y_fant = _get_random_data(
+            X_fant, Y_fant = get_random_data(
                 batch_shape=fant_shape, m=1, d=d, n=3, **tkwargs
             )
             c_kwargs = (

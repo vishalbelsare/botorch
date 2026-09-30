@@ -6,44 +6,18 @@
 from __future__ import annotations
 
 import math
-from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Union
 
 import torch
 from torch import Tensor
 from torch.nn import Parameter
 
 
-class HomotopySchedule(ABC):
-    @property
-    @abstractmethod
-    def num_steps(self) -> int:
-        """Number of steps in the schedule."""
-
-    @property
-    @abstractmethod
-    def value(self) -> Any:
-        """Current value in the schedule."""
-
-    @property
-    @abstractmethod
-    def should_stop(self) -> bool:
-        """Return true if we have incremented past the end of the schedule."""
-
-    @abstractmethod
-    def restart(self) -> None:
-        """Restart the schedule to start from the beginning."""
-
-    @abstractmethod
-    def step(self) -> None:
-        """Move to solving the next problem."""
-
-
-class FixedHomotopySchedule(HomotopySchedule):
+class FixedHomotopySchedule:
     """Homotopy schedule with a fixed list of values."""
 
-    def __init__(self, values: List[Any]) -> None:
+    def __init__(self, values: list[float]) -> None:
         r"""Initialize FixedHomotopySchedule.
 
         Args:
@@ -57,7 +31,7 @@ class FixedHomotopySchedule(HomotopySchedule):
         return len(self._values)
 
     @property
-    def value(self) -> Any:
+    def value(self) -> float:
         return self._values[self.idx]
 
     @property
@@ -105,7 +79,7 @@ class LogLinearHomotopySchedule(FixedHomotopySchedule):
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class HomotopyParameter:
     r"""Homotopy parameter.
 
@@ -113,32 +87,33 @@ class HomotopyParameter:
     correspond to a buffer of a module. The parameter has a corresponding schedule.
     """
 
-    parameter: Union[Parameter, Tensor]
-    schedule: HomotopySchedule
+    parameter: Parameter | Tensor
+    schedule: FixedHomotopySchedule
 
 
 class Homotopy:
     """Generic homotopy class.
 
-    This class is designed to be used in `optimize_acqf_homotopy`. Given a set of
+    This class is designed to be used in ``optimize_acqf_homotopy``. Given a set of
     homotopy parameters and corresponding schedules we step through the homotopies
     until we have solved the final problem. We additionally support passing in a list
-    of callbacks that will be executed each time `step`, `reset`, and `restart` are
-    called.
+    of callbacks that will be executed each time ``step``, ``reset``, and ``restart``
+    are called.
     """
 
     def __init__(
         self,
-        homotopy_parameters: List[HomotopyParameter],
-        callbacks: Optional[List[Callable]] = None,
+        homotopy_parameters: list[HomotopyParameter],
+        callbacks: list[Callable] | None = None,
     ) -> None:
         r"""Initialize the homotopy.
 
         Args:
             homotopy_parameters: List of homotopy parameters
             callbacks: Optional list of callbacks that are executed each time
-                `restart`, `reset`, or `step` are called. These may be used to, e.g.,
-                reinitialize the acquisition function which is needed when using qNEHVI.
+                ``restart``, ``reset``, or ``step`` are called. These may be used to,
+                e.g., reinitialize the acquisition function which is needed when using
+                qNEHVI.
         """
         self._homotopy_parameters = homotopy_parameters
         self._callbacks = callbacks or []

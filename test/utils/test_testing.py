@@ -4,8 +4,17 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import warnings
+
 import torch
-from botorch.utils.testing import BotorchTestCase, MockModel, MockPosterior
+from botorch.exceptions.warnings import InputDataWarning
+from botorch.models.gp_regression import SingleTaskGP
+from botorch.utils.testing import (
+    BotorchTestCase,
+    MockModel,
+    MockPosterior,
+    skip_if_import_error,
+)
 
 
 class TestMockPosterior(BotorchTestCase):
@@ -49,3 +58,30 @@ class TestMockModel(BotorchTestCase):
         self.assertEqual(mm.num_outputs, 0)
         mm.state_dict()
         mm.load_state_dict()
+
+
+class TestMisc(BotorchTestCase):
+    def test_warning_filtering(self) -> None:
+        with warnings.catch_warnings(record=True) as ws:
+            # Model with unstandardized float data, which would typically raise
+            # multiple warnings.
+            SingleTaskGP(
+                train_X=torch.rand(5, 2, dtype=torch.float) * 10,
+                train_Y=torch.rand(5, 1, dtype=torch.float) * 10,
+            )
+        self.assertFalse(any(w.category == InputDataWarning for w in ws))
+
+    def test_skip_if_import_error(self) -> None:
+        error_msg = "import error"
+        msg = (
+            "Skipping test because module is not installed. Received the "
+            f"following error: {error_msg}"
+        )
+
+        def func():
+            raise ImportError(error_msg)
+
+        safe_func = skip_if_import_error(func=func)
+        with warnings.catch_warnings(record=True) as ws:
+            safe_func()
+        self.assertTrue(any(str(w.message) == msg for w in ws))

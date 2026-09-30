@@ -4,14 +4,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import List, Optional
+
+from itertools import product
 
 import torch
 from botorch.exceptions.errors import InputDataError, UnsupportedError
 from botorch.utils.containers import DenseContainer, SliceContainer
 from botorch.utils.datasets import (
     ContextualDataset,
-    FixedNoiseDataset,
     MultiTaskDataset,
     RankingDataset,
     SupervisedDataset,
@@ -25,9 +25,9 @@ def make_dataset(
     d: int = 2,
     m: int = 1,
     has_yvar: bool = False,
-    feature_names: Optional[List[str]] = None,
-    outcome_names: Optional[List[str]] = None,
-    batch_shape: Optional[torch.Size] = None,
+    feature_names: list[str] | None = None,
+    outcome_names: list[str] | None = None,
+    batch_shape: torch.Size | None = None,
 ) -> SupervisedDataset:
     feature_names = feature_names or [f"x{i}" for i in range(d)]
     outcome_names = outcome_names or [f"y{i}" for i in range(m)]
@@ -41,17 +41,77 @@ def make_dataset(
     )
 
 
+def make_contextual_dataset(
+    has_yvar: bool = False, contextual_outcome: bool = False
+) -> tuple[ContextualDataset, list[SupervisedDataset]]:
+    num_contexts = 3
+    feature_names = [f"x_c{i}" for i in range(num_contexts)]
+    parameter_decomposition = {
+        "context_2": ["x_c2"],
+        "context_1": ["x_c1"],
+        "context_0": ["x_c0"],
+    }
+    context_buckets = list(parameter_decomposition.keys())
+    if contextual_outcome:
+        context_outcome_list = [f"y:context_{i}" for i in range(num_contexts)]
+        metric_decomposition = {f"{c}": [f"y:{c}"] for c in context_buckets}
+
+        dataset_list2 = [
+            make_dataset(
+                d=1 * num_contexts,
+                has_yvar=has_yvar,
+                feature_names=feature_names,
+                outcome_names=[context_outcome_list[0]],
+            )
+        ]
+        for mname in context_outcome_list[1:]:
+            dataset_list2.append(
+                SupervisedDataset(
+                    X=dataset_list2[0].X,
+                    Y=rand(dataset_list2[0].Y.size()),
+                    Yvar=rand(dataset_list2[0].Yvar.size()) if has_yvar else None,
+                    feature_names=feature_names,
+                    outcome_names=[mname],
+                )
+            )
+        context_dt = ContextualDataset(
+            datasets=dataset_list2,
+            parameter_decomposition=parameter_decomposition,
+            metric_decomposition=metric_decomposition,
+        )
+        return context_dt, dataset_list2
+    dataset_list1 = [
+        make_dataset(
+            d=num_contexts,
+            has_yvar=has_yvar,
+            feature_names=feature_names,
+            outcome_names=["y"],
+        )
+    ]
+    context_dt = ContextualDataset(
+        datasets=dataset_list1,
+        parameter_decomposition=parameter_decomposition,
+    )
+    return context_dt, dataset_list1
+
+
 class TestDatasets(BotorchTestCase):
     def test_supervised(self):
         # Generate some data
-        X = rand(3, 2)
-        Y = rand(3, 1)
+        n_rows = 3
+        X = rand(n_rows, 2)
+        Y = rand(n_rows, 1)
         feature_names = ["x1", "x2"]
         outcome_names = ["y"]
+        group_indices = tensor(range(n_rows))
 
-        # Test `__init__`
+        # Test ``__init__``
         dataset = SupervisedDataset(
-            X=X, Y=Y, feature_names=feature_names, outcome_names=outcome_names
+            X=X,
+            Y=Y,
+            feature_names=feature_names,
+            outcome_names=outcome_names,
+            group_indices=group_indices,
         )
         self.assertIsInstance(dataset.X, Tensor)
         self.assertIsInstance(dataset._X, Tensor)
@@ -59,12 +119,14 @@ class TestDatasets(BotorchTestCase):
         self.assertIsInstance(dataset._Y, Tensor)
         self.assertEqual(dataset.feature_names, feature_names)
         self.assertEqual(dataset.outcome_names, outcome_names)
+        self.assertTrue(torch.equal(dataset.group_indices, group_indices))
 
         dataset2 = SupervisedDataset(
-            X=DenseContainer(X, X.shape[-1:]),
-            Y=DenseContainer(Y, Y.shape[-1:]),
+            X=DenseContainer(values=X, event_shape=X.shape[-1:]),
+            Y=DenseContainer(values=Y, event_shape=Y.shape[-1:]),
             feature_names=feature_names,
             outcome_names=outcome_names,
+            group_indices=group_indices,
         )
         self.assertIsInstance(dataset2.X, Tensor)
         self.assertIsInstance(dataset2._X, DenseContainer)
@@ -72,7 +134,7 @@ class TestDatasets(BotorchTestCase):
         self.assertIsInstance(dataset2._Y, DenseContainer)
         self.assertEqual(dataset, dataset2)
 
-        # Test `_validate`
+        # Test ``_validate``
         with self.assertRaisesRegex(ValueError, "Batch dimensions .* incompatible."):
             SupervisedDataset(
                 X=rand(1, 2),
@@ -102,12 +164,20 @@ class TestDatasets(BotorchTestCase):
                 feature_names=feature_names,
                 outcome_names=[],
             )
+        with self.assertRaisesRegex(ValueError, "group_indices"):
+            SupervisedDataset(
+                X=rand(2, 2),
+                Y=rand(2, 1),
+                feature_names=feature_names,
+                outcome_names=outcome_names,
+                group_indices=tensor(range(n_rows + 1)),
+            )
 
         # Test with Yvar.
         dataset = SupervisedDataset(
             X=X,
             Y=Y,
-            Yvar=DenseContainer(Y, Y.shape[-1:]),
+            Yvar=DenseContainer(values=Y, event_shape=Y.shape[-1:]),
             feature_names=feature_names,
             outcome_names=outcome_names,
         )
@@ -123,6 +193,70 @@ class TestDatasets(BotorchTestCase):
         self.assertNotEqual(dataset, dataset2)
         self.assertNotEqual(dataset2, dataset)
 
+    def test_clone(self, supervised: bool = True) -> None:
+        has_yvar_options = [False]
+        if supervised:
+            has_yvar_options.append(True)
+        for has_yvar in has_yvar_options:
+            if supervised:
+                dataset = make_dataset(has_yvar=has_yvar)
+            else:
+                X_val = rand(16, 2)
+                X_idx = stack([randperm(len(X_val))[:3] for _ in range(1)])
+                X = SliceContainer(
+                    values=X_val, indices=X_idx, event_shape=Size([3 * X_val.shape[-1]])
+                )
+                dataset = RankingDataset(
+                    X=X,
+                    Y=tensor([[0, 1, 1]]),
+                    feature_names=["x1", "x2"],
+                    outcome_names=["ranking indices"],
+                )
+
+            for use_deepcopy in [False, True]:
+                dataset2 = dataset.clone(deepcopy=use_deepcopy)
+                self.assertEqual(dataset, dataset2)
+                self.assertTrue(torch.equal(dataset.X, dataset2.X))
+                self.assertTrue(torch.equal(dataset.Y, dataset2.Y))
+                if has_yvar:
+                    self.assertTrue(torch.equal(dataset.Yvar, dataset2.Yvar))
+                else:
+                    self.assertIsNone(dataset2.Yvar)
+                self.assertEqual(dataset.feature_names, dataset2.feature_names)
+                self.assertEqual(dataset.outcome_names, dataset2.outcome_names)
+                if use_deepcopy:
+                    self.assertIsNot(dataset.X, dataset2.X)
+                    self.assertIsNot(dataset.Y, dataset2.Y)
+                    if has_yvar:
+                        self.assertIsNot(dataset.Yvar, dataset2.Yvar)
+                    self.assertIsNot(dataset.feature_names, dataset2.feature_names)
+                    self.assertIsNot(dataset.outcome_names, dataset2.outcome_names)
+                else:
+                    self.assertIs(dataset._X, dataset2._X)
+                    self.assertIs(dataset._Y, dataset2._Y)
+                    self.assertIs(dataset._Yvar, dataset2._Yvar)
+                    self.assertEqual(dataset.feature_names, dataset2.feature_names)
+                    self.assertEqual(dataset.outcome_names, dataset2.outcome_names)
+                # test with mask
+                mask = torch.tensor([0, 1, 1], dtype=torch.bool)
+                if supervised:
+                    dataset2 = dataset.clone(deepcopy=use_deepcopy, mask=mask)
+                    self.assertTrue(torch.equal(dataset.X[1:], dataset2.X))
+                    self.assertTrue(torch.equal(dataset.Y[1:], dataset2.Y))
+                    if has_yvar:
+                        self.assertTrue(torch.equal(dataset.Yvar[1:], dataset2.Yvar))
+                    else:
+                        self.assertIsNone(dataset2.Yvar)
+                else:
+                    with self.assertRaisesRegex(
+                        NotImplementedError,
+                        "Masking is not supported for BotorchContainers.",
+                    ):
+                        dataset.clone(deepcopy=use_deepcopy, mask=mask)
+
+    def test_clone_ranking(self) -> None:
+        self.test_clone(supervised=False)
+
     def test_fixedNoise(self):
         # Generate some data
         X = rand(3, 2)
@@ -130,7 +264,7 @@ class TestDatasets(BotorchTestCase):
         Yvar = rand(3, 1)
         feature_names = ["x1", "x2"]
         outcome_names = ["y"]
-        dataset = FixedNoiseDataset(
+        dataset = SupervisedDataset(
             X=X,
             Y=Y,
             Yvar=Yvar,
@@ -143,22 +277,13 @@ class TestDatasets(BotorchTestCase):
         self.assertEqual(dataset.feature_names, feature_names)
         self.assertEqual(dataset.outcome_names, outcome_names)
 
-        with self.assertRaisesRegex(
-            ValueError, "`Y` and `Yvar`"
-        ), self.assertWarnsRegex(DeprecationWarning, "SupervisedDataset"):
-            FixedNoiseDataset(
-                X=X,
-                Y=Y,
-                Yvar=Yvar.squeeze(),
-                feature_names=feature_names,
-                outcome_names=outcome_names,
-            )
-
     def test_ranking(self):
-        # Test `_validate`
+        # Test ``_validate``
         X_val = rand(16, 2)
         X_idx = stack([randperm(len(X_val))[:3] for _ in range(1)])
-        X = SliceContainer(X_val, X_idx, event_shape=Size([3 * X_val.shape[-1]]))
+        X = SliceContainer(
+            values=X_val, indices=X_idx, event_shape=Size([3 * X_val.shape[-1]])
+        )
         feature_names = ["x1", "x2"]
         outcome_names = ["ranking indices"]
 
@@ -355,6 +480,88 @@ class TestDatasets(BotorchTestCase):
         ):
             mt_dataset.X
 
+        # Test equality.
+        self.assertEqual(mt_dataset, mt_dataset)
+        self.assertNotEqual(mt_dataset, dataset_5)
+        self.assertNotEqual(
+            mt_dataset, MultiTaskDataset(datasets=[dataset_1], target_outcome_name="y")
+        )
+        self.assertNotEqual(
+            mt_dataset,
+            MultiTaskDataset(datasets=[dataset_1, dataset_5], target_outcome_name="z"),
+        )
+
+    def test_get_heterogeneous_feature_mapping(self):
+        ds_target = make_dataset(
+            d=3, feature_names=["a", "b", "task"], outcome_names=["y"]
+        )
+        ds_source = make_dataset(
+            d=3, feature_names=["a", "c", "task"], outcome_names=["z"]
+        )
+        mt_err = MultiTaskDataset(
+            datasets=[ds_target, ds_source],
+            target_outcome_name="y",
+            task_feature_index=0,
+        )
+        with self.assertRaises(NotImplementedError):
+            mt_err.get_heterogeneous_feature_mapping()
+
+        mt = MultiTaskDataset(
+            datasets=[ds_target, ds_source],
+            target_outcome_name="y",
+            task_feature_index=-1,
+        )
+        all_datasets, feature_indices, full_dim = mt.get_heterogeneous_feature_mapping()
+        self.assertEqual(len(all_datasets), 2)
+        self.assertEqual(full_dim, 3)
+        self.assertEqual(feature_indices, [[0, 1], [0, 2]])
+
+    def test_clone_multitask(self) -> None:
+        for has_yvar in [False, True]:
+            dataset_1 = make_dataset(outcome_names=["y"], has_yvar=has_yvar)
+            dataset_2 = make_dataset(outcome_names=["z"], has_yvar=has_yvar)
+            mt_dataset = MultiTaskDataset(
+                datasets=[dataset_1, dataset_2],
+                target_outcome_name="z",
+            )
+            for use_deepcopy in [False, True]:
+                mt_dataset2 = mt_dataset.clone(deepcopy=use_deepcopy)
+                self.assertEqual(mt_dataset, mt_dataset2)
+                self.assertTrue(torch.equal(mt_dataset.X, mt_dataset2.X))
+                self.assertTrue(torch.equal(mt_dataset.Y, mt_dataset2.Y))
+                if has_yvar:
+                    self.assertTrue(torch.equal(mt_dataset.Yvar, mt_dataset2.Yvar))
+                else:
+                    self.assertIsNone(mt_dataset2.Yvar)
+                self.assertEqual(mt_dataset.feature_names, mt_dataset2.feature_names)
+                self.assertEqual(mt_dataset.outcome_names, mt_dataset2.outcome_names)
+                if use_deepcopy:
+                    for ds, ds2 in zip(
+                        mt_dataset.datasets.values(), mt_dataset2.datasets.values()
+                    ):
+                        self.assertIsNot(ds, ds2)
+                else:
+                    for ds, ds2 in zip(
+                        mt_dataset.datasets.values(), mt_dataset2.datasets.values()
+                    ):
+                        self.assertIs(ds, ds2)
+                # test with mask
+                mask = torch.tensor([0, 1, 1], dtype=torch.bool)
+                mt_dataset2 = mt_dataset.clone(deepcopy=use_deepcopy, mask=mask)
+                # mask should only apply to target dataset.
+                # All non-target datasets should be included.
+                full_mask = torch.tensor([1, 1, 1, 0, 1, 1], dtype=torch.bool)
+                self.assertTrue(torch.equal(mt_dataset.X[full_mask], mt_dataset2.X))
+                self.assertTrue(torch.equal(mt_dataset.Y[full_mask], mt_dataset2.Y))
+                if has_yvar:
+                    self.assertTrue(
+                        torch.equal(mt_dataset.Yvar[full_mask], mt_dataset2.Yvar)
+                    )
+                else:
+                    self.assertIsNone(mt_dataset2.Yvar)
+                self.assertEqual(mt_dataset.feature_names, mt_dataset2.feature_names)
+                self.assertEqual(mt_dataset.outcome_names, mt_dataset2.outcome_names)
+
     def test_contextual_datasets(self):
         num_contexts = 3
         feature_names = [f"x_c{i}" for i in range(num_contexts)]
@@ -368,17 +575,8 @@ class TestDatasets(BotorchTestCase):
         metric_decomposition = {f"{c}": [f"y:{c}"] for c in context_buckets}
 
         # test construction of agg outcome
-        dataset_list1 = [
-            make_dataset(
-                d=1 * num_contexts,
-                has_yvar=True,
-                feature_names=feature_names,
-                outcome_names=["y"],
-            )
-        ]
-        context_dt = ContextualDataset(
-            datasets=dataset_list1,
-            parameter_decomposition=parameter_decomposition,
+        context_dt, dataset_list1 = make_contextual_dataset(
+            has_yvar=True, contextual_outcome=False
         )
         self.assertEqual(len(context_dt.datasets), len(dataset_list1))
         self.assertListEqual(context_dt.context_buckets, context_buckets)
@@ -390,28 +588,8 @@ class TestDatasets(BotorchTestCase):
         self.assertIs(context_dt.Yvar, dataset_list1[0].Yvar)
 
         # test construction of context outcome
-        dataset_list2 = [
-            make_dataset(
-                d=1 * num_contexts,
-                has_yvar=True,
-                feature_names=feature_names,
-                outcome_names=[context_outcome_list[0]],
-            )
-        ]
-        for m in context_outcome_list[1:]:
-            dataset_list2.append(
-                SupervisedDataset(
-                    X=dataset_list2[0].X,
-                    Y=rand(dataset_list2[0].Y.size()),
-                    Yvar=rand(dataset_list2[0].Yvar.size()),
-                    feature_names=feature_names,
-                    outcome_names=[m],
-                )
-            )
-        context_dt = ContextualDataset(
-            datasets=dataset_list2,
-            parameter_decomposition=parameter_decomposition,
-            metric_decomposition=metric_decomposition,
+        context_dt, dataset_list2 = make_contextual_dataset(
+            has_yvar=True, contextual_outcome=True
         )
         self.assertEqual(len(context_dt.datasets), len(dataset_list2))
         # Ordering should match datasets, not parameter_decomposition
@@ -428,30 +606,10 @@ class TestDatasets(BotorchTestCase):
             self.assertIs(context_dt.datasets[dt.outcome_names[0]], dt)
 
         # Test handling None Yvar
-        dataset_list3 = [
-            make_dataset(
-                d=1 * num_contexts,
-                has_yvar=False,
-                feature_names=feature_names,
-                outcome_names=[context_outcome_list[0]],
-            )
-        ]
-        for m in context_outcome_list[1:]:
-            dataset_list3.append(
-                SupervisedDataset(
-                    X=dataset_list3[0].X,
-                    Y=rand(dataset_list3[0].Y.size()),
-                    Yvar=None,
-                    feature_names=feature_names,
-                    outcome_names=[m],
-                )
-            )
-        context_dt3 = ContextualDataset(
-            datasets=dataset_list3,
-            parameter_decomposition=parameter_decomposition,
-            metric_decomposition=metric_decomposition,
+        context_dt, dataset_list3 = make_contextual_dataset(
+            has_yvar=False, contextual_outcome=True
         )
-        self.assertIsNone(context_dt3.Yvar)
+        self.assertIsNone(context_dt.Yvar)
 
         # test dataset validation
         wrong_metric_decomposition1 = {
@@ -547,3 +705,68 @@ class TestDatasets(BotorchTestCase):
                 parameter_decomposition=parameter_decomposition,
                 metric_decomposition=wrong_metric_decomposition,
             )
+
+    def test_clone_contextual_dataset(self):
+        for has_yvar, contextual_outcome in product((False, True), (False, True)):
+            context_dt, _ = make_contextual_dataset(
+                has_yvar=has_yvar, contextual_outcome=contextual_outcome
+            )
+            for use_deepcopy in [False, True]:
+                context_dt2 = context_dt.clone(deepcopy=use_deepcopy)
+                self.assertEqual(context_dt, context_dt2)
+                self.assertTrue(torch.equal(context_dt.X, context_dt2.X))
+                self.assertTrue(torch.equal(context_dt.Y, context_dt2.Y))
+                if has_yvar:
+                    self.assertTrue(torch.equal(context_dt.Yvar, context_dt2.Yvar))
+                else:
+                    self.assertIsNone(context_dt.Yvar)
+                self.assertEqual(context_dt.feature_names, context_dt2.feature_names)
+                self.assertEqual(context_dt.outcome_names, context_dt2.outcome_names)
+                if use_deepcopy:
+                    for ds, ds2 in zip(
+                        context_dt.datasets.values(), context_dt2.datasets.values()
+                    ):
+                        self.assertIsNot(ds, ds2)
+                else:
+                    for ds, ds2 in zip(
+                        context_dt.datasets.values(), context_dt2.datasets.values()
+                    ):
+                        self.assertIs(ds, ds2)
+                # test with mask
+                mask = torch.tensor([0, 1, 1], dtype=torch.bool)
+                context_dt2 = context_dt.clone(deepcopy=use_deepcopy, mask=mask)
+                self.assertTrue(torch.equal(context_dt.X[mask], context_dt2.X))
+                self.assertTrue(torch.equal(context_dt.Y[mask], context_dt2.Y))
+                if has_yvar:
+                    self.assertTrue(
+                        torch.equal(context_dt.Yvar[mask], context_dt2.Yvar)
+                    )
+                else:
+                    self.assertIsNone(context_dt2.Yvar)
+                self.assertEqual(context_dt.feature_names, context_dt2.feature_names)
+                self.assertEqual(context_dt.outcome_names, context_dt2.outcome_names)
+                self.assertEqual(
+                    context_dt.parameter_decomposition,
+                    context_dt2.parameter_decomposition,
+                )
+                if contextual_outcome:
+                    self.assertEqual(
+                        context_dt.metric_decomposition,
+                        context_dt2.metric_decomposition,
+                    )
+                else:
+                    self.assertIsNone(context_dt2.metric_decomposition)
+
+    def test_contextual_dataset_equality(self) -> None:
+        context_dt, _ = make_contextual_dataset(has_yvar=True, contextual_outcome=True)
+        clone = context_dt.clone()
+        self.assertEqual(context_dt, clone)
+        for yvar, outcome in (
+            (True, False),
+            (False, True),
+            (False, False),
+        ):
+            new_dt, _ = make_contextual_dataset(
+                has_yvar=yvar, contextual_outcome=outcome
+            )
+            self.assertNotEqual(context_dt, new_dt)

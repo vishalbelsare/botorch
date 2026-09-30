@@ -6,11 +6,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from copy import deepcopy
-
 from functools import partial
-from itertools import count
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
+from itertools import count, product
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -22,13 +22,12 @@ from torch import Tensor
 
 
 def run_gaussian_estimator(
-    estimator: Callable[[Tensor], Tuple[Tensor, Union[Tensor, float, int]]],
+    estimator: Callable[[Tensor], tuple[Tensor, Tensor | float | int]],
     sqrt_cov: Tensor,
     num_samples: int,
-    batch_limit: Optional[int] = None,
-    seed: Optional[int] = None,
+    batch_limit: int | None = None,
+    seed: int | None = None,
 ) -> Tensor:
-
     if batch_limit is None:
         batch_limit = num_samples
 
@@ -62,7 +61,7 @@ class TestMVNXPB(BotorchTestCase):
         self,
         ndims: Sequence[int] = (4, 8),
         batch_shape: Sequence[int] = (4,),
-        bound_range: Tuple[float, float] = (-5.0, 5.0),
+        bound_range: tuple[float, float] = (-5.0, 5.0),
         mc_num_samples: int = 100000,
         mc_batch_limit: int = 10000,
         mc_atol_multiplier: float = 4.0,
@@ -116,8 +115,8 @@ class TestMVNXPB(BotorchTestCase):
         self,
         ndim: int,
         batch_shape: Sequence[int] = (),
-        bound_range: Optional[Tuple[float, float]] = None,
-    ) -> Tuple[Tensor, Tensor]:
+        bound_range: tuple[float, float] | None = None,
+    ) -> tuple[Tensor, Tensor]:
         shape = tuple(batch_shape) + (ndim,)
         lower = torch.rand(shape, **self.tkwargs)
         upper = lower + (1 - lower) * torch.rand_like(lower)
@@ -128,7 +127,7 @@ class TestMVNXPB(BotorchTestCase):
         return torch.stack([lower, upper], dim=-1)
 
     @property
-    def tkwargs(self) -> Dict[str, Any]:
+    def tkwargs(self) -> dict[str, Any]:
         return {"dtype": self.dtype, "device": self.device}
 
     def assertEqualMXNBPB(self, A: MVNXPB, B: MVNXPB):
@@ -147,7 +146,7 @@ class TestMVNXPB(BotorchTestCase):
             self.assertTrue(a.allclose(b, equal_nan=True))
 
     def test_solve(self):
-        r"""Monte Carlo unit test for `solve`."""
+        r"""Monte Carlo unit test for ``solve``."""
 
         def _estimator(samples, bounds):
             accept = torch.logical_and(
@@ -178,8 +177,31 @@ class TestMVNXPB(BotorchTestCase):
 
                 self.assertAllClose(est, prob, rtol=0, atol=atol)
 
+    def test_solve_batch(self):
+        ndim = 3
+        batch_shape = (3, 4)
+        with torch.random.fork_rng():
+            torch.random.manual_seed(next(self.seed_generator))
+            bounds = self.gen_bounds(ndim, batch_shape, bound_range=(-5.0, +5.0))
+            sqrt_cov = self.gen_covariances(ndim, batch_shape, as_sqrt=True)
+
+        cov = sqrt_cov @ sqrt_cov.mT
+
+        batched_solver = MVNXPB(cov, bounds)
+        batched_solver.solve()
+
+        # solution for each individual batch element is the same as
+        # that of the entire batch
+        for idx in product(*map(range, batch_shape)):
+            solver = MVNXPB(cov[tuple(idx)], bounds[tuple(idx)])
+            solver.solve()
+            self.assertAlmostEqual(
+                batched_solver.log_prob[tuple(idx)].item(),
+                solver.log_prob.item(),
+            )
+
     def test_augment(self):
-        r"""Test `augment`."""
+        r"""Test ``augment``."""
         with torch.random.fork_rng():
             torch.random.manual_seed(next(self.seed_generator))
 
@@ -194,13 +216,13 @@ class TestMVNXPB(BotorchTestCase):
             cov = sqrt_cov @ sqrt_cov.transpose(-2, -1)
             bounds = self.bounds[index]
 
-            # Partially solve for `N`-dimensional integral
+            # Partially solve for ``N``-dimensional integral
             N = cov.shape[-1]
             n = torch.randint(low=1, high=N - 2, size=())
             full = MVNXPB(cov, bounds=bounds)
             full.solve(num_steps=n)
 
-            # Compare with solver run using a pre-computed `piv_chol`
+            # Compare with solver run using a pre-computed ``piv_chol``
             _perm = torch.arange(0, N, device=self.device)
             other = MVNXPB.build(
                 step=0,
@@ -216,14 +238,14 @@ class TestMVNXPB(BotorchTestCase):
             self.assertTrue(full.bounds.allclose(other.bounds))
             self.assertTrue(full.log_prob.allclose(other.log_prob))
 
-            # Reorder terms according according to `full.perm`
+            # Reorder terms according according to ``full.perm``
             perm = full.perm.detach().clone()
             _cov = cov.gather(-2, perm.unsqueeze(-1).repeat(1, 1, N))
             _cov = _cov.gather(-1, perm.unsqueeze(-2).repeat(1, N, 1))
             _istd = _cov.diagonal(dim1=-2, dim2=-1).rsqrt()
             _bounds = bounds.gather(-2, perm.unsqueeze(-1).repeat(1, 1, 2))
 
-            # Solve for same `n`-dimensional integral as `full.solve(num_steps=n)`
+            # Solve for same ``n``-dimensional integral as ``full.solve(num_steps=n)``
             init = MVNXPB(_cov[..., :n, :n], _bounds[..., :n, :])
             init.solve()
 
@@ -249,12 +271,13 @@ class TestMVNXPB(BotorchTestCase):
                 bounds=_bounds[..., n:, :],
             )
 
-            # Patch `perm` to account for different starting points
+            # Patch ``perm`` to account for different starting points
             augm_perm = augm.perm
             temp_perm = perm.gather(-1, augm_perm)
             self.assertTrue(augm_perm.equal(augm.piv_chol.perm))
-            with patch.object(augm, "perm", new=temp_perm), patch.object(
-                augm.piv_chol, "perm", new=temp_perm
+            with (
+                patch.object(augm, "perm", new=temp_perm),
+                patch.object(augm.piv_chol, "perm", new=temp_perm),
             ):
                 self.assertEqualMXNBPB(full, augm)
 
@@ -264,12 +287,13 @@ class TestMVNXPB(BotorchTestCase):
             full.solve()
             augm.solve()
 
-            # Patch `perm` to account for different starting points
+            # Patch ``perm`` to account for different starting points
             augm_perm = augm.perm
             temp_perm = perm.gather(-1, augm_perm)
             self.assertTrue(augm_perm.equal(augm.piv_chol.perm))
-            with patch.object(augm, "perm", new=temp_perm), patch.object(
-                augm.piv_chol, "perm", new=temp_perm
+            with (
+                patch.object(augm, "perm", new=temp_perm),
+                patch.object(augm.piv_chol, "perm", new=temp_perm),
             ):
                 self.assertEqualMXNBPB(full, augm)
 
@@ -330,8 +354,11 @@ class TestMVNXPB(BotorchTestCase):
         self.assertEqualMXNBPB(self.toy_solver, other)
 
         # Test exception handling
-        with patch.object(A, "step", new=A.step + 1), self.assertRaisesRegex(
-            ValueError, "`self.step` does not equal `other.step`."
+        with (
+            patch.object(A, "step", new=A.step + 1),
+            self.assertRaisesRegex(
+                ValueError, "`self.step` does not equal `other.step`."
+            ),
         ):
             A.concat(B, dim=0)
 
@@ -341,8 +368,11 @@ class TestMVNXPB(BotorchTestCase):
         with self.assertRaisesRegex(ValueError, "not a valid batch dimension"):
             A.concat(B, dim=-9)
 
-        with patch.object(A, "plug_ins", new=None), self.assertRaisesRegex(
-            TypeError, "Concatenation failed: `self.plug_ins` has type"
+        with (
+            patch.object(A, "plug_ins", new=None),
+            self.assertRaisesRegex(
+                TypeError, "Concatenation failed: `self.plug_ins` has type"
+            ),
         ):
             A.concat(B, dim=0)
 

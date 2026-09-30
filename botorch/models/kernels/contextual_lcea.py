@@ -4,12 +4,12 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import torch
+from botorch.models.utils.gpytorch_modules import get_covar_module_with_dim_scaled_prior
 from gpytorch.constraints import Positive
 from gpytorch.kernels.kernel import Kernel
-from gpytorch.kernels.matern_kernel import MaternKernel
 from gpytorch.priors.torch_priors import GammaPrior
 from linear_operator.operators import DiagLinearOperator
 from linear_operator.operators.dense_linear_operator import DenseLinearOperator
@@ -17,7 +17,7 @@ from torch import Tensor
 from torch.nn import ModuleList
 
 
-def get_order(indices: List[int]) -> List[int]:
+def get_order(indices: list[int]) -> list[int]:
     r"""Get the order indices as integers ranging from 0 to the number of indices.
 
     Args:
@@ -29,7 +29,7 @@ def get_order(indices: List[int]) -> List[int]:
     return [i % len(indices) for i in indices]
 
 
-def is_contiguous(indices: List[int]) -> bool:
+def is_contiguous(indices: list[int]) -> bool:
     r"""Check if the list of integers is contiguous.
 
     Args:
@@ -41,7 +41,7 @@ def is_contiguous(indices: List[int]) -> bool:
     return set(indices) == set(range(min_idx, min_idx + len(indices)))
 
 
-def get_permutation(decomposition: Dict[str, List[int]]) -> Optional[List[int]]:
+def get_permutation(decomposition: dict[str, list[int]]) -> list[int] | None:
     """Construct permutation to reorder the parameters such that:
 
     1) the parameters for each context are contiguous.
@@ -52,7 +52,7 @@ def get_permutation(decomposition: Dict[str, List[int]]) -> Optional[List[int]]:
             parameters.
     Returns:
         A permutation to reorder the parameters for (1) and (2).
-        Returning `None` means that ordering specified in `decomposition`
+        Returning ``None`` means that ordering specified in ``decomposition``
         satisfies (1) and (2).
     """
     permutation = None
@@ -74,7 +74,7 @@ def get_permutation(decomposition: Dict[str, List[int]]) -> Optional[List[int]]:
     return permutation
 
 
-def _create_new_permutation(decomposition: Dict[str, List[int]]) -> List[int]:
+def _create_new_permutation(decomposition: dict[str, list[int]]) -> list[int]:
     # make contiguous and ordered
     permutation = []
     for active_parameters in decomposition.values():
@@ -87,7 +87,7 @@ class LCEAKernel(Kernel):
     r"""The Latent Context Embedding Additive (LCE-A) Kernel.
 
     This kernel is similar to the SACKernel, and is used when context breakdowns are
-    unbserverable. It assumes the same additive structure and a spatial kernel shared
+    unobservable. It assumes the same additive structure and a spatial kernel shared
     across contexts. Rather than assuming independence, LCEAKernel models the
     correlation in the latent functions for each context through learning context
     embeddings.
@@ -95,14 +95,14 @@ class LCEAKernel(Kernel):
 
     def __init__(
         self,
-        decomposition: Dict[str, List[int]],
+        decomposition: dict[str, list[int]],
         batch_shape: torch.Size,
         train_embedding: bool = True,
-        cat_feature_dict: Optional[Dict] = None,
-        embs_feature_dict: Optional[Dict] = None,
-        embs_dim_list: Optional[List[int]] = None,
-        context_weight_dict: Optional[Dict] = None,
-        device: Optional[torch.device] = None,
+        cat_feature_dict: dict | None = None,
+        embs_feature_dict: dict | None = None,
+        embs_dim_list: list[int] | None = None,
+        context_weight_dict: dict | None = None,
+        device: torch.device | None = None,
     ) -> None:
         r"""
         Args:
@@ -111,7 +111,7 @@ class LCEAKernel(Kernel):
             batch_shape: Batch shape as usual for gpytorch kernels. Model does not
                 support batch training. When batch_shape is non-empty, it is used for
                 loading hyper-parameter values generated from MCMC sampling.
-            train_embedding: A boolean indictor of whether to learn context embeddings.
+            train_embedding: A boolean indicator of whether to learn context embeddings.
             cat_feature_dict: Keys are context names and values are list of categorical
                 features i.e. {"context_name" : [cat_0, ..., cat_k]}. k equals the
                 number of categorical variables. If None, uses context names in the
@@ -154,22 +154,18 @@ class LCEAKernel(Kernel):
             embs_feature_dict=embs_feature_dict,
             embs_dim_list=embs_dim_list,
         )
-        # contruct embedding layer
+        # construct embedding layer
         if train_embedding:
             self._set_emb_layers()
         # task covariance matrix
-        self.task_covar_module = MaternKernel(
-            nu=2.5,
+        self.task_covar_module = get_covar_module_with_dim_scaled_prior(
             ard_num_dims=self.n_embs,
             batch_shape=batch_shape,
-            lengthscale_prior=GammaPrior(3.0, 6.0),
         )
         # base kernel
-        self.base_kernel = MaternKernel(
-            nu=2.5,
+        self.base_kernel = get_covar_module_with_dim_scaled_prior(
             ard_num_dims=self.num_param,
             batch_shape=batch_shape,
-            lengthscale_prior=GammaPrior(3.0, 6.0),
         )
         # outputscales for each context (note this is like sqrt of outputscale)
         self.context_weight = None
@@ -194,7 +190,7 @@ class LCEAKernel(Kernel):
         self.register_constraint("raw_outputscale_list", Positive())
 
     @property
-    def device(self) -> Optional[torch.device]:
+    def device(self) -> torch.device | None:
         return self._device
 
     @property
@@ -216,9 +212,9 @@ class LCEAKernel(Kernel):
 
     def _set_context_features(
         self,
-        cat_feature_dict: Optional[Dict] = None,
-        embs_feature_dict: Optional[Dict] = None,
-        embs_dim_list: Optional[List[int]] = None,
+        cat_feature_dict: dict | None = None,
+        embs_feature_dict: dict | None = None,
+        embs_dim_list: list[int] | None = None,
     ) -> None:
         """Set context categorical features and continuous embedding features.
         If cat_feature_dict is None, context indices will be used; If embs_dim_list
@@ -295,7 +291,8 @@ class LCEAKernel(Kernel):
         else:
             context_outputscales = self.outputscale_list * self.context_weight
         context_covar = (
-            (context_outputscales.unsqueeze(-2))  # (ns) x 1 x num_contexts
+            (context_outputscales.unsqueeze(-2))
+            # (ns) x 1 x num_contexts
             .mul(context_covar)
             .mul(context_outputscales.unsqueeze(-1))  # (ns) x num_contexts x 1
         )
@@ -402,17 +399,17 @@ class LCEAKernel(Kernel):
 
     def _eval_base_covar_perm(self, x1: Tensor, x2: Tensor) -> Tensor:
         """Computes the base covariance matrix on x1, x2, applying permutations and
-        reshaping the kernel matrix as required by `forward`.
+        reshaping the kernel matrix as required by ``forward``.
 
         NOTE: Using the notation n = num_observations, k = num_contexts, d = input_dim,
         the input tensors have to have the following shapes.
 
         Args:
-            x1: `batch_shape x n x (k*d)`-dim Tensor of kernel inputs.
-            x2: `batch_shape x n x (k*d)`-dim Tensor of kernel inputs.
+            x1: ``batch_shape x n x (k*d)``-dim Tensor of kernel inputs.
+            x2: ``batch_shape x n x (k*d)``-dim Tensor of kernel inputs.
 
         Returns:
-            `batch_shape x n x n x k x k`-dim Tensor of base covariance values.
+            ``batch_shape x n x n x k x k``-dim Tensor of base covariance values.
         """
         if self.permutation is not None:
             x1 = x1[..., self.permutation]

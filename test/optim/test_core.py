@@ -6,7 +6,6 @@
 
 import time
 from functools import partial
-from typing import Dict
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -18,6 +17,7 @@ from botorch.optim.core import (
     scipy_minimize,
     torch_minimize,
 )
+from botorch.optim.stopping import ExpMAStoppingCriterion
 from botorch.utils.testing import BotorchTestCase
 from numpy import allclose
 from scipy.optimize import OptimizeResult
@@ -43,7 +43,7 @@ class ToyModule(Module):
         return (self.x - self.b).square().sum()
 
     @property
-    def free_parameters(self) -> Dict[str, Tensor]:
+    def free_parameters(self) -> dict[str, Tensor]:
         return {n: p for n, p in self.named_parameters() if p.requires_grad}
 
 
@@ -114,7 +114,7 @@ class TestScipyMinimize(BotorchTestCase):
                 self.assertTrue(closure.parameters["dummy"].equal(cache["dummy"]))
                 self.assertFalse(closure.parameters["x"].equal(cache["x"]))
 
-        # Test `bounds` and `callback`
+        # Test ``bounds`` and ``callback``
         with torch.no_grad():  # closure.forward is a ToyModule instance
             closure.forward.b.fill_(0.0)
             closure.forward.x.fill_(0.5)
@@ -136,11 +136,20 @@ class TestScipyMinimize(BotorchTestCase):
     def test_post_processing(self):
         closure = next(iter(self.closures.values()))
         wrapper = NdarrayOptimizationClosure(closure, closure.parameters)
+
+        # Scipy changed return values and messages in v1.15, so we check both
+        # old and new versions here.
+        status_msgs = [
+            # scipy >=1.15
+            (OptimizationStatus.FAILURE, "ABNORMAL_TERMINATION_IN_LNSRCH"),
+            (OptimizationStatus.STOPPED, "TOTAL NO. of ITERATIONS REACHED LIMIT"),
+            # scipy <1.15
+            (OptimizationStatus.FAILURE, "ABNORMAL "),
+            (OptimizationStatus.STOPPED, "TOTAL NO. OF ITERATIONS REACHED LIMIT"),
+        ]
+
         with patch.object(core, "minimize_with_timeout") as mock_minimize_with_timeout:
-            for status, msg in (
-                (OptimizationStatus.FAILURE, b"ABNORMAL_TERMINATION_IN_LNSRCH"),
-                (OptimizationStatus.STOPPED, "TOTAL NO. of ITERATIONS REACHED LIMIT"),
-            ):
+            for status, msg in status_msgs:
                 mock_minimize_with_timeout.return_value = OptimizeResult(
                     x=wrapper.state,
                     fun=1.0,
@@ -229,7 +238,7 @@ class TestTorchMinimize(BotorchTestCase):
             self.assertTrue(allclose(0.0, result.fval))
             self.assertEqual(result.step, 100)
 
-            # Test `bounds` and `callback`
+            # Test ``bounds`` and ``callback``
             with torch.no_grad():  # closure.forward is a ToyModule instance
                 closure.forward.b.fill_(0.0)
                 closure.forward.x.fill_(0.11)
@@ -245,17 +254,17 @@ class TestTorchMinimize(BotorchTestCase):
             self.assertTrue(allclose(0.01, result.fval))
             self.assertEqual(result.step, len(step_results))
 
-            # Test `stopping_criterion`
-            stopping_decisions = iter((False, False, True, False))
+            # Test ``stopping_criterion``
+            max3_stopping_criterion = ExpMAStoppingCriterion(maxiter=3, n_window=5)
             result = torch_minimize(
                 closure=closure,
                 parameters=closure.parameters,
-                stopping_criterion=lambda fval: next(stopping_decisions),
+                stopping_criterion=max3_stopping_criterion,
             )
             self.assertEqual(result.step, 3)
             self.assertEqual(result.status, OptimizationStatus.STOPPED)
 
-            # Test passing `scheduler`
+            # Test passing ``scheduler``
             mock_scheduler = MagicMock(spec=LRScheduler)
             mock_scheduler.step = MagicMock(side_effect=RuntimeError("foo"))
             with self.assertRaisesRegex(RuntimeError, "foo"):
@@ -267,7 +276,7 @@ class TestTorchMinimize(BotorchTestCase):
                 )
             mock_scheduler.step.assert_called_once()
 
-            # Test passing `scheduler` as a factory
+            # Test passing ``scheduler`` as a factory
             optimizer = SGD(list(closure.parameters.values()), lr=1e-3)
             mock_factory = MagicMock(side_effect=RuntimeError("foo"))
             with self.assertRaisesRegex(RuntimeError, "foo"):

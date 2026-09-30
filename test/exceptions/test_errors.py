@@ -5,13 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import numpy as np
-
 from botorch.exceptions.errors import (
     BotorchError,
     BotorchTensorDimensionError,
     CandidateGenerationError,
     DeprecationError,
+    InfeasibilityError,
     InputDataError,
+    OptimizationGradientError,
     OptimizationTimeoutError,
     UnsupportedError,
 )
@@ -27,6 +28,7 @@ class TestBotorchExceptions(BotorchTestCase):
             InputDataError,
             UnsupportedError,
             BotorchTensorDimensionError,
+            InfeasibilityError,
         ]:
             self.assertIsInstance(ErrorClass(), BotorchError)
 
@@ -37,6 +39,7 @@ class TestBotorchExceptions(BotorchTestCase):
             CandidateGenerationError,
             InputDataError,
             UnsupportedError,
+            InfeasibilityError,
         ):
             with self.assertRaises(ErrorClass):
                 raise ErrorClass("message")
@@ -48,4 +51,10 @@ class TestBotorchExceptions(BotorchTestCase):
         self.assertEqual(error.runtime, 0.123)
         self.assertTrue(np.array_equal(error.current_x, np.array([1.0])))
         with self.assertRaises(OptimizationTimeoutError):
+            raise error
+
+    def test_OptimizationGradientError(self):
+        error = OptimizationGradientError("message", current_x=np.array([1.0]))
+        self.assertTrue(np.array_equal(error.current_x, np.array([1.0])))
+        with self.assertRaisesRegex(OptimizationGradientError, "message"):
             raise error

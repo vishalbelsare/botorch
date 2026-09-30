@@ -6,8 +6,8 @@
 
 r"""Abstract base module for all BoTorch models.
 
-This module contains `Model`, the abstract base class for all BoTorch models,
-and `ModelList`, a container for a list of Models.
+This module contains ``Model``, the abstract base class for all BoTorch models,
+and ``ModelList``, a container for a list of Models.
 """
 
 from __future__ import annotations
@@ -15,18 +15,8 @@ from __future__ import annotations
 import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    Mapping,
-    Optional,
-    Set,
-    TYPE_CHECKING,
-    TypeVar,
-    Union,
-)
+from collections.abc import Callable, Mapping
+from typing import Any, Self, TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -43,7 +33,6 @@ from botorch.sampling.base import MCSampler
 from botorch.sampling.list_sampler import ListSampler
 from botorch.utils.containers import BotorchContainer
 from botorch.utils.datasets import SupervisedDataset
-from botorch.utils.transforms import is_fully_bayesian
 from gpytorch.likelihoods.gaussian_likelihood import FixedNoiseGaussianLikelihood
 from torch import Tensor
 from torch.nn import Module, ModuleDict, ModuleList
@@ -51,40 +40,38 @@ from torch.nn import Module, ModuleDict, ModuleList
 if TYPE_CHECKING:
     from botorch.acquisition.objective import PosteriorTransform  # pragma: no cover
 
-TFantasizeMixin = TypeVar("TFantasizeMixin", bound="FantasizeMixin")
-
 
 class Model(Module, ABC):
     r"""Abstract base class for BoTorch models.
 
-    The `Model` base class cannot be used directly; it only defines an API for other
+    The ``Model`` base class cannot be used directly; it only defines an API for other
     BoTorch models.
 
-    `Model` subclasses `torch.nn.Module`. While a `Module` is most typically
+    ``Model`` subclasses ``torch.nn.Module``. While a ``Module`` is most typically
     encountered as a representation of a neural network layer, it can be used more
     generally: see
-    `documentation <https://pytorch.org/tutorials/beginner/examples_nn/polynomial_module.html>`_
+    documentation <https://pytorch.org/tutorials/beginner/examples_nn/polynomial_module.html>_
     on custom NN Modules.
 
-    `Module` provides several pieces of useful functionality: A `Model`'s attributes of
-    `Tensor` or `Module` type are automatically registered so they can be moved and/or
-    cast with the `to` method, automatically differentiated, and used with CUDA.
+    ``Module`` provides several pieces of useful functionality: A ``Model``'s attributes of
+    ``Tensor`` or ``Module`` type are automatically registered so they can be moved and/or
+    cast with the ``to`` method, automatically differentiated, and used with CUDA.
 
     Attributes:
-        _has_transformed_inputs: A boolean denoting whether `train_inputs` are currently
+        _has_transformed_inputs: A boolean denoting whether ``train_inputs`` are currently
             stored as transformed or not.
         _original_train_inputs: A Tensor storing the original train inputs for use in
-            `_revert_to_original_inputs`. Note that this is necessary since
+            ``_revert_to_original_inputs``. Note that this is necessary since
             transform / untransform cycle introduces numerical errors which lead
             to upstream errors during training.
-        _is_fully_bayesian: Returns `True` if this is a fully Bayesian model.
-        _is_ensemble: Returns `True` if this model consists of multiple models
+        _is_fully_bayesian: Returns ``True`` if this is a fully Bayesian model.
+        _is_ensemble: Returns ``True`` if this model consists of multiple models
             that are stored in an additional batch dimension. This is true for the fully
             Bayesian models.
     """  # noqa: E501
 
     _has_transformed_inputs: bool = False
-    _original_train_inputs: Optional[Tensor] = None
+    _original_train_inputs: Tensor | None = None
     _is_fully_bayesian = False
     _is_ensemble = False
 
@@ -92,20 +79,20 @@ class Model(Module, ABC):
     def posterior(
         self,
         X: Tensor,
-        output_indices: Optional[List[int]] = None,
-        observation_noise: Union[bool, Tensor] = False,
-        posterior_transform: Optional[PosteriorTransform] = None,
+        output_indices: list[int] | None = None,
+        observation_noise: bool | Tensor = False,
+        posterior_transform: PosteriorTransform | None = None,
     ) -> Posterior:
         r"""Computes the posterior over model outputs at the provided points.
 
         Note: The input transforms should be applied here using
-            `self.transform_inputs(X)` after the `self.eval()` call and before
-            any `model.forward` or `model.likelihood` calls.
+            ``self.transform_inputs(X)`` after the ``self.eval()`` call and before
+            any ``model.forward`` or ``model.likelihood`` calls.
 
         Args:
-            X: A `b x q x d`-dim Tensor, where `d` is the dimension of the
-                feature space, `q` is the number of points considered jointly,
-                and `b` is the batch dimension.
+            X: A ``b x q x d``-dim Tensor, where ``d`` is the dimension of the
+                feature space, ``q`` is the number of points considered jointly,
+                and ``b`` is the batch dimension.
             output_indices: A list of indices, corresponding to the outputs over
                 which to compute the posterior (if the model is multi-output).
                 Can be used to speed up computation if only a subset of the
@@ -113,15 +100,15 @@ class Model(Module, ABC):
                 computes the posterior over all model outputs.
             observation_noise: For models with an inferred noise level, if True,
                 include observation noise. For models with an observed noise level,
-                this must be a `model_batch_shape x 1 x m`-dim tensor or
-                a `model_batch_shape x n' x m`-dim tensor containing the average
-                noise for each batch and output. `noise` must be in the
+                this must be a ``model_batch_shape x 1 x m``-dim tensor or
+                a ``model_batch_shape x n' x m``-dim tensor containing the average
+                noise for each batch and output. ``noise`` must be in the
                 outcome-transformed space if an outcome transform is used.
             posterior_transform: An optional PosteriorTransform.
 
         Returns:
-            A `Posterior` object, representing a batch of `b` joint distributions
-            over `q` points and `m` outputs each.
+            A ``Posterior`` object, representing a batch of ``b`` joint distributions
+            over ``q`` points and ``m`` outputs each.
         """
         pass  # pragma: no cover
 
@@ -131,9 +118,9 @@ class Model(Module, ABC):
 
         This is a batch shape from an I/O perspective, independent of the internal
         representation of the model (as e.g. in BatchedMultiOutputGPyTorchModel).
-        For a model with `m` outputs, a `test_batch_shape x q x d`-shaped input `X`
-        to the `posterior` method returns a Posterior object over an output of
-        shape `broadcast(test_batch_shape, model.batch_shape) x q x m`.
+        For a model with ``m`` outputs, a ``test_batch_shape x q x d``-shaped
+        input ``X`` to the ``posterior`` method returns a Posterior object over
+        an output of shape ``broadcast(test_batch_shape, model.batch_shape) x q x m``.
         """
         cls_name = self.__class__.__name__
         raise NotImplementedError(f"{cls_name} does not define batch_shape property")
@@ -144,14 +131,14 @@ class Model(Module, ABC):
         cls_name = self.__class__.__name__
         raise NotImplementedError(f"{cls_name} does not define num_outputs property")
 
-    def subset_output(self, idcs: List[int]) -> Model:
+    def subset_output(self, idcs: list[int]) -> Model:
         r"""Subset the model along the output dimension.
 
         Args:
             idcs: The output indices to subset the model to.
 
         Returns:
-            A `Model` object of the same type and with the same parameters as
+            A ``Model`` object of the same type and with the same parameters as
             the current model, subset to the specified output indices.
         """
         raise NotImplementedError
@@ -160,21 +147,21 @@ class Model(Module, ABC):
         r"""Condition the model on new observations.
 
         Args:
-            X: A `batch_shape x n' x d`-dim Tensor, where `d` is the dimension of
-                the feature space, `n'` is the number of points per batch, and
-                `batch_shape` is the batch shape (must be compatible with the
+            X: A ``batch_shape x n' x d``-dim Tensor, where ``d`` is the dimension of
+                the feature space, ``n'`` is the number of points per batch, and
+                ``batch_shape`` is the batch shape (must be compatible with the
                 batch shape of the model).
-            Y: A `batch_shape' x n' x m`-dim Tensor, where `m` is the number of
-                model outputs, `n'` is the number of points per batch, and
-                `batch_shape'` is the batch shape of the observations.
-                `batch_shape'` must be broadcastable to `batch_shape` using
-                standard broadcasting semantics. If `Y` has fewer batch dimensions
-                than `X`, it is assumed that the missing batch dimensions are
-                the same for all `Y`.
+            Y: A ``batch_shape' x n' x m``-dim Tensor, where ``m`` is the number of
+                model outputs, ``n'`` is the number of points per batch, and
+                ``batch_shape'`` is the batch shape of the observations.
+                ``batch_shape'`` must be broadcastable to ``batch_shape`` using
+                standard broadcasting semantics. If ``Y`` has fewer batch dimensions
+                than ``X``, it is assumed that the missing batch dimensions are
+                the same for all ``Y``.
 
         Returns:
-            A `Model` object of the same type, representing the original model
-            conditioned on the new observations `(X, Y)` (and possibly noise
+            A ``Model`` object of the same type, representing the original model
+            conditioned on the new observations ``(X, Y)`` (and possibly noise
             observations passed in via kwargs).
         """
         raise NotImplementedError(
@@ -185,17 +172,17 @@ class Model(Module, ABC):
     def construct_inputs(
         cls,
         training_data: SupervisedDataset,
-    ) -> Dict[str, Union[BotorchContainer, Tensor]]:
+    ) -> dict[str, BotorchContainer | Tensor]:
         """
-        Construct `Model` keyword arguments from a `SupervisedDataset`.
+        Construct ``Model`` keyword arguments from a ``SupervisedDataset``.
 
         Args:
-            training_data: A `SupervisedDataset`, with attributes `train_X`,
-                `train_Y`, and, optionally, `train_Yvar`.
+            training_data: A ``SupervisedDataset``, with attributes ``train_X``,
+                ``train_Y``, and, optionally, ``train_Yvar``.
 
         Returns:
-            A dict of keyword arguments that can be used to initialize a `Model`,
-            with keys `train_X`, `train_Y`, and, optionally, `train_Yvar`.
+            A dict of keyword arguments that can be used to initialize a ``Model``,
+            with keys ``train_X``, ``train_Y``, and, optionally, ``train_Yvar``.
         """
         if not isinstance(training_data, SupervisedDataset):
             raise TypeError(
@@ -210,7 +197,7 @@ class Model(Module, ABC):
     def transform_inputs(
         self,
         X: Tensor,
-        input_transform: Optional[Module] = None,
+        input_transform: Module | None = None,
     ) -> Tensor:
         r"""Transform inputs.
 
@@ -247,6 +234,7 @@ class Model(Module, ABC):
                     "attribute. Make sure that the `input_transform` is applied to "
                     "both the train inputs and test inputs.",
                     RuntimeWarning,
+                    stacklevel=3,
                 )
 
     def _revert_to_original_inputs(self) -> None:
@@ -255,18 +243,19 @@ class Model(Module, ABC):
             self.set_train_data(self._original_train_inputs, strict=False)
             self._has_transformed_inputs = False
 
-    def eval(self) -> Model:
-        r"""Puts the model in `eval` mode and sets the transformed inputs."""
+    def eval(self) -> Self:
+        r"""Puts the model in ``eval`` mode and sets the transformed inputs."""
         self._set_transformed_inputs()
         return super().eval()
 
-    def train(self, mode: bool = True) -> Model:
-        r"""Put the model in `train` mode. Reverts to the original inputs if in `train`
-        mode (`mode=True`) or sets transformed inputs if in `eval` mode (`mode=False`).
+    def train(self, mode: bool = True) -> Self:
+        r"""Put the model in ``train`` mode. Reverts to the original inputs if
+        in ``train`` mode (``mode=True``) or sets transformed inputs if in
+        ``eval`` mode (``mode=False``).
 
         Args:
-            mode: A boolean denoting whether to put in `train` or `eval` mode.
-                If `False`, model is put in `eval` mode.
+            mode: A boolean denoting whether to put in ``train`` or ``eval`` mode.
+                If ``False``, model is put in ``eval`` mode.
         """
         if mode:
             self._revert_to_original_inputs()
@@ -275,13 +264,13 @@ class Model(Module, ABC):
         return super().train(mode=mode)
 
     @property
-    def dtypes_of_buffers(self) -> Set[torch.dtype]:
+    def dtypes_of_buffers(self) -> set[torch.dtype]:
         return {t.dtype for t in self.buffers() if t is not None}
 
 
 class FantasizeMixin(ABC):
     """
-    Mixin to add a `fantasize` method to a `Model`.
+    Mixin to add a ``fantasize`` method to a ``Model``.
 
     Example:
         class BaseModel:
@@ -299,14 +288,10 @@ class FantasizeMixin(ABC):
     """
 
     @abstractmethod
-    def condition_on_observations(
-        self: TFantasizeMixin,
-        X: Tensor,
-        Y: Tensor,
-    ) -> TFantasizeMixin:
+    def condition_on_observations(self, X: Tensor, Y: Tensor) -> Self:
         """
-        Classes that inherit from `FantasizeMixin` must implement
-        a `condition_on_observations` method.
+        Classes that inherit from ``FantasizeMixin`` must implement
+        a ``condition_on_observations`` method.
         """
 
     @abstractmethod
@@ -317,57 +302,53 @@ class FantasizeMixin(ABC):
         observation_noise: bool = False,
     ) -> Posterior:
         """
-        Classes that inherit from `FantasizeMixin` must implement
-        a `posterior` method.
+        Classes that inherit from ``FantasizeMixin`` must implement
+        a ``posterior`` method.
         """
 
     @abstractmethod
     def transform_inputs(
         self,
         X: Tensor,
-        input_transform: Optional[Module] = None,
+        input_transform: Module | None = None,
     ) -> Tensor:
         """
-        Classes that inherit from `FantasizeMixin` must implement
-        a `transform_inputs` method.
+        Classes that inherit from ``FantasizeMixin`` must implement
+        a ``transform_inputs`` method.
         """
 
-    # When Python 3.11 arrives we can start annotating return types like
-    # this as
-    # 'Self', but at this point the verbose 'T...' syntax is needed.
     def fantasize(
-        self: TFantasizeMixin,
-        # TODO: see if any of these can be imported only if TYPE_CHECKING
+        self,
         X: Tensor,
         sampler: MCSampler,
-        observation_noise: Optional[Tensor] = None,
+        observation_noise: Tensor | None = None,
         **kwargs: Any,
-    ) -> TFantasizeMixin:
+    ) -> Self:
         r"""Construct a fantasy model.
 
         Constructs a fantasy model in the following fashion:
-        (1) compute the model posterior at `X`, including observation noise.
-        If `observation_noise` is a Tensor, use it directly as the observation
+        (1) compute the model posterior at ``X``, including observation noise.
+        If ``observation_noise`` is a Tensor, use it directly as the observation
         noise to add.
-        (2) sample from this posterior (using `sampler`) to generate "fake"
+        (2) sample from this posterior (using ``sampler``) to generate "fake"
         observations.
         (3) condition the model on the new fake observations.
 
         Args:
-            X: A `batch_shape x n' x d`-dim Tensor, where `d` is the dimension of
-                the feature space, `n'` is the number of points per batch, and
-                `batch_shape` is the batch shape (must be compatible with the
+            X: A ``batch_shape x n' x d``-dim Tensor, where ``d`` is the dimension of
+                the feature space, ``n'`` is the number of points per batch, and
+                ``batch_shape`` is the batch shape (must be compatible with the
                 batch shape of the model).
-            sampler: The sampler used for sampling from the posterior at `X`.
-            observation_noise: A `model_batch_shape x 1 x m`-dim tensor or
-                a `model_batch_shape x n' x m`-dim tensor containing the average
-                noise for each batch and output, where `m` is the number of outputs.
-                `noise` must be in the outcome-transformed space if an outcome
+            sampler: The sampler used for sampling from the posterior at ``X``.
+            observation_noise: A ``model_batch_shape x 1 x m``-dim tensor or
+                a ``model_batch_shape x n' x m``-dim tensor containing the average
+                noise for each batch and output, where ``m`` is the number of outputs.
+                ``noise`` must be in the outcome-transformed space if an outcome
                 transform is used.
                 If None and using an inferred noise likelihood, the noise will be the
                 inferred noise level. If using a fixed noise likelihood, the mean across
                 the observation noise in the training data is used as observation noise.
-            kwargs: Will be passed to `model.condition_on_observations`
+            kwargs: Will be passed to ``model.condition_on_observations``
 
         Returns:
             The constructed fantasy model.
@@ -397,7 +378,7 @@ class FantasizeMixin(ABC):
             if observation_noise is not None:
                 kwargs["noise"] = observation_noise.expand(Y.shape[1:])
             return self.condition_on_observations(
-                X=self.transform_inputs(X),
+                X=X,
                 Y=Y,
                 **kwargs,
             )
@@ -413,17 +394,15 @@ class FantasizeMixin(ABC):
             Y_fantasized = sampler(post_X)  # num_fantasies x batch_shape x n' x m
             if observation_noise is not None:
                 kwargs["noise"] = observation_noise.expand(Y_fantasized.shape[1:])
-            return self.condition_on_observations(
-                X=self.transform_inputs(X), Y=Y_fantasized, **kwargs
-            )
+            return self.condition_on_observations(X=X, Y=Y_fantasized, **kwargs)
 
 
 class ModelList(Model):
     r"""A multi-output Model represented by a list of independent models.
 
     All BoTorch models are acceptable as inputs. The cost of this flexibility is
-    that `ModelList` does not support all methods that may be implemented by its
-    component models. One use case for `ModelList` is combining a regression
+    that ``ModelList`` does not support all methods that may be implemented by its
+    component models. One use case for ``ModelList`` is combining a regression
     model and a deterministic model in one multi-output container model, e.g.
     for cost-aware or multi-objective optimization where one of the outcomes is
     a deterministic function of the inputs.
@@ -443,25 +422,23 @@ class ModelList(Model):
         super().__init__()
         self.models = ModuleList(models)
 
-    def _get_group_subset_indices(
-        self, idcs: Optional[List[int]]
-    ) -> Dict[int, List[int]]:
+    def _get_group_subset_indices(self, idcs: list[int] | None) -> dict[int, list[int]]:
         r"""Convert global subset indices to indices for the individual models.
 
         Args:
-            idcs: A list of indices to which the `ModelList` model is to be
+            idcs: A list of indices to which the ``ModelList`` model is to be
                 subset to.
 
         Returns:
             A dictionary mapping model indices to subset indices of the
-                respective model in the `ModelList`.
+                respective model in the ``ModelList``.
         """
         if idcs is None:
-            return {i: None for i in range(len(self.models))}
+            return dict.fromkeys(range(len(self.models)))
         output_sizes = [model.num_outputs for model in self.models]
         cum_output_sizes = np.cumsum(output_sizes)
         idcs = [idx % cum_output_sizes[-1] for idx in idcs]
-        group_indices: Dict[int, List[int]] = defaultdict(list)
+        group_indices: dict[int, list[int]] = defaultdict(list)
         for idx in idcs:
             grp_idx = np.argwhere(idx < cum_output_sizes)[0].item()
             sub_idx = idx - int(np.sum(output_sizes[:grp_idx]))
@@ -471,20 +448,20 @@ class ModelList(Model):
     def posterior(
         self,
         X: Tensor,
-        output_indices: Optional[List[int]] = None,
-        observation_noise: Union[bool, Tensor] = False,
-        posterior_transform: Optional[Callable[[PosteriorList], Posterior]] = None,
+        output_indices: list[int] | None = None,
+        observation_noise: bool | Tensor = False,
+        posterior_transform: Callable[[PosteriorList], Posterior] | None = None,
     ) -> Posterior:
         r"""Computes the posterior over model outputs at the provided points.
 
         Note: The input transforms should be applied here using
-            `self.transform_inputs(X)` after the `self.eval()` call and before
-            any `model.forward` or `model.likelihood` calls.
+            ``self.transform_inputs(X)`` after the ``self.eval()`` call and before
+            any ``model.forward`` or ``model.likelihood`` calls.
 
         Args:
-            X: A `b x q x d`-dim Tensor, where `d` is the dimension of the
-                feature space, `q` is the number of points considered jointly,
-                and `b` is the batch dimension.
+            X: A ``b x q x d``-dim Tensor, where ``d`` is the dimension of the
+                feature space, ``q`` is the number of points considered jointly,
+                and ``b`` is the batch dimension.
             output_indices: A list of indices, corresponding to the outputs over
                 which to compute the posterior (if the model is multi-output).
                 Can be used to speed up computation if only a subset of the
@@ -492,16 +469,16 @@ class ModelList(Model):
                 computes the posterior over all model outputs.
             observation_noise: If True, add the observation noise from the
                 respective likelihoods to the posterior. If a Tensor of shape
-                `(batch_shape) x q x m`, use it directly as the observation
-                noise (with `observation_noise[...,i]` added to the posterior
-                of the `i`-th model). `observation_noise` is assumed
+                ``(batch_shape) x q x m``, use it directly as the observation
+                noise (with ``observation_noise[...,i]`` added to the posterior
+                of the ``i``-th model). ``observation_noise`` is assumed
                 to be in the outcome-transformed space, if an outcome transform
                 is used by the model.
             posterior_transform: An optional PosteriorTransform.
 
         Returns:
-            A `Posterior` object, representing a batch of `b` joint distributions
-            over `q` points and `m` outputs each.
+            A ``Posterior`` object, representing a batch of ``b`` joint distributions
+            over ``q`` points and ``m`` outputs each.
         """
         group_indices = self._get_group_subset_indices(idcs=output_indices)
         posteriors = []
@@ -521,7 +498,7 @@ class ModelList(Model):
             )
         posterior = PosteriorList(*posteriors)
         if posterior_transform is not None:
-            posterior = posterior_transform(posterior)
+            posterior = posterior_transform(posterior=posterior, X=X)
         return posterior
 
     @property
@@ -530,9 +507,9 @@ class ModelList(Model):
 
         This is a batch shape from an I/O perspective, independent of the internal
         representation of the model (as e.g. in BatchedMultiOutputGPyTorchModel).
-        For a model with `m` outputs, a `test_batch_shape x q x d`-shaped input `X`
-        to the `posterior` method returns a Posterior object over an output of
-        shape `broadcast(test_batch_shape, model.batch_shape) x q x m`.
+        For a model with ``m`` outputs, a ``test_batch_shape x q x d``-shaped
+        input ``X`` to the ``posterior`` method returns a Posterior object over
+        an output of shape ``broadcast(test_batch_shape, model.batch_shape) x q x m``.
         """
         batch_shape = self.models[0].batch_shape
         if all(batch_shape == m.batch_shape for m in self.models[1:]):
@@ -552,7 +529,7 @@ class ModelList(Model):
         """
         return sum(model.num_outputs for model in self.models)
 
-    def subset_output(self, idcs: List[int]) -> Model:
+    def subset_output(self, idcs: list[int]) -> Model:
         r"""Subset the model along the output dimension.
 
         Args:
@@ -560,16 +537,16 @@ class ModelList(Model):
                 overall number of outputs of the model.
 
         Returns:
-            A `Model` (either a `ModelList` or one of the submodels) with
-            the outputs subset to the indices in `idcs`.
+            A ``Model`` (either a ``ModelList`` or one of the submodels) with
+            the outputs subset to the indices in ``idcs``.
 
         Internally, this drops (if single-output) or subsets (if multi-output)
-        the constitutent models and returns them as a `ModelList`. If the
+        the constituent models and returns them as a ``ModelList``. If the
         result is a single (possibly subset) model from the list, returns this
-        model (instead of forming a degenerate singe-model `ModelList`).
-        For instance, if `m = ModelList(m1, m2)` with `m1` a two-output model
-        and `m2` a single-output model, then `m.subset_output([1]) ` will return
-        the model `m1` subset to its second output.
+        model (instead of forming a degenerate single-model ``ModelList``).
+        For instance, if ``m = ModelList(m1, m2)`` with ``m1`` a two-output model
+        and ``m2`` a single-output model, then ``m.subset_output([1]) `` will return
+        the model ``m1`` subset to its second output.
         """
         group_indices = self._get_group_subset_indices(idcs=idcs)
         subset_models = []
@@ -582,7 +559,7 @@ class ModelList(Model):
             return subset_models[0]
         return self.__class__(*subset_models)
 
-    def transform_inputs(self, X: Tensor) -> List[Tensor]:
+    def transform_inputs(self, X: Tensor) -> list[Tensor]:
         r"""Individually transform the inputs for each model.
 
         Args:
@@ -600,50 +577,52 @@ class ModelList(Model):
         return transformed_X_list
 
     def load_state_dict(
-        self, state_dict: Mapping[str, Any], strict: bool = True
+        self,
+        state_dict: Mapping[str, Any],
+        strict: bool = True,
+        keep_transforms: bool = True,
+        assign: bool = False,
     ) -> None:
         """Initialize the fully Bayesian models before loading the state dict."""
         for i, m in enumerate(self.models):
-            if is_fully_bayesian(m):
-                filtered_dict = {
-                    k.replace(f"models.{i}.", ""): v
-                    for k, v in state_dict.items()
-                    if k.startswith(f"models.{i}.")
-                }
-                m.load_state_dict(filtered_dict)
-        super().load_state_dict(state_dict=state_dict, strict=strict)
+            filtered_dict = {
+                k.replace(f"models.{i}.", ""): v
+                for k, v in state_dict.items()
+                if k.startswith(f"models.{i}.")
+            }
+            m.load_state_dict(filtered_dict, strict=strict, assign=assign)
 
     def fantasize(
         self,
         X: Tensor,
         sampler: MCSampler,
-        observation_noise: Optional[Tensor] = None,
-        evaluation_mask: Optional[Tensor] = None,
+        observation_noise: Tensor | None = None,
+        evaluation_mask: Tensor | None = None,
         **kwargs: Any,
     ) -> Model:
         r"""Construct a fantasy model.
 
         Constructs a fantasy model in the following fashion:
-        (1) compute the model posterior at `X` (including observation noise if
-        `observation_noise=True`).
-        (2) sample from this posterior (using `sampler`) to generate "fake"
+        (1) compute the model posterior at ``X`` (including observation noise if
+        ``observation_noise=True``).
+        (2) sample from this posterior (using ``sampler``) to generate "fake"
         observations.
         (3) condition the model on the new fake observations.
 
         Args:
-            X: A `batch_shape x n' x d`-dim Tensor, where `d` is the dimension of
-                the feature space, `n'` is the number of points per batch, and
-                `batch_shape` is the batch shape (must be compatible with the
+            X: A ``batch_shape x n' x d``-dim Tensor, where ``d`` is the dimension of
+                the feature space, ``n'`` is the number of points per batch, and
+                ``batch_shape`` is the batch shape (must be compatible with the
                 batch shape of the model).
-            sampler: The sampler used for sampling from the posterior at `X`. If
-                evaluation_mask is not None, this must be a `ListSampler`.
-            observation_noise: A `model_batch_shape x 1 x m`-dim tensor or
-                a `model_batch_shape x n' x m`-dim tensor containing the average
-                noise for each batch and output, where `m` is the number of outputs.
-                `noise` must be in the outcome-transformed space if an outcome
+            sampler: The sampler used for sampling from the posterior at ``X``. If
+                evaluation_mask is not None, this must be a ``ListSampler``.
+            observation_noise: A ``model_batch_shape x 1 x m``-dim tensor or
+                a ``model_batch_shape x n' x m``-dim tensor containing the average
+                noise for each batch and output, where ``m`` is the number of outputs.
+                ``noise`` must be in the outcome-transformed space if an outcome
                 transform is used. If None, then the noise will be the inferred
                 noise level.
-            evaluation_mask: A `n' x m`-dim tensor of booleans indicating which
+            evaluation_mask: A ``n' x m``-dim tensor of booleans indicating which
                 outputs should be fantasized for a given design. This uses the same
                 evaluation mask for all batches.
 
@@ -681,6 +660,8 @@ class ModelList(Model):
                 sampler_i = (
                     sampler.samplers[i] if isinstance(sampler, ListSampler) else sampler
                 )
+                if observation_noise is not None:
+                    observation_noise_i = observation_noise[..., i : i + 1]
 
             fant_model = self.models[i].fantasize(
                 X=X_i,
@@ -696,11 +677,11 @@ class ModelDict(ModuleDict):
     r"""A lightweight container mapping model names to models."""
 
     def __init__(self, **models: Model) -> None:
-        r"""Initialize a `ModelDict`.
+        r"""Initialize a ``ModelDict``.
 
         Args:
             models: An arbitrary number of models. Each model can be any type
-                of BoTorch `Model`, including multi-output models and `ModelList`.
+                of BoTorch ``Model``, including multi-output models and ``ModelList``.
         """
         if any(not isinstance(m, Model) for m in models.values()):
             raise InputDataError(

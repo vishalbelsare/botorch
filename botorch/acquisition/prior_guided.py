@@ -15,15 +15,18 @@ References
     Augmenting Acquisition Functions with User Beliefs for Bayesian Optimization.
     ICLR 2022.
 """
-from __future__ import annotations
 
-from typing import Optional
+from __future__ import annotations
 
 from botorch.acquisition.acquisition import AcquisitionFunction
 from botorch.acquisition.monte_carlo import SampleReducingMCAcquisitionFunction
-from botorch.utils.transforms import concatenate_pending_points, t_batch_mode_transform
+from botorch.exceptions.errors import BotorchError
+from botorch.utils.transforms import (
+    average_over_ensemble_models,
+    concatenate_pending_points,
+    t_batch_mode_transform,
+)
 from torch import Tensor
-
 from torch.nn import Module
 
 
@@ -42,7 +45,7 @@ class PriorGuidedAcquisitionFunction(AcquisitionFunction):
         prior_module: Module,
         log: bool = False,
         prior_exponent: float = 1.0,
-        X_pending: Optional[Tensor] = None,
+        X_pending: Tensor | None = None,
     ) -> None:
         r"""Initialize the prior-guided acquisition function.
 
@@ -50,18 +53,26 @@ class PriorGuidedAcquisitionFunction(AcquisitionFunction):
             acq_function: The base acquisition function.
             prior_module: A Module that computes the probability
                 (or log probability) for the provided inputs.
-                `prior_module.forward` should take a `batch_shape x q`-dim
-                tensor of inputs and return a `batch_shape x q`-dim tensor
+                ``prior_module.forward`` should take a ``batch_shape x q``-dim
+                tensor of inputs and return a ``batch_shape x q``-dim tensor
                 of probabilities.
             log: A boolean that should be true if the acquisition function emits a
                 log-transformed value and the prior module emits a log probability.
             prior_exponent: The exponent applied to the prior. This can be used
                 for example  to decay the effect the prior over time as in
                 [Hvarfner2022]_.
-            X_pending: `n x d` Tensor with `n` `d`-dim design points that have
+            X_pending: ``n x d`` Tensor with ``n`` ``d``-dim design points that have
                 been submitted for evaluation but have not yet been evaluated.
+                Note: X_pending should be provided as an argument to or set on
+                ``PriorGuidedAcquisitionFunction``, but not set on the underlying
+                acquisition function.
         """
         super().__init__(model=acq_function.model)
+        if getattr(acq_function, "X_pending", None) is not None:
+            raise BotorchError(
+                "X_pending is set on acq_function, but should be set on "
+                "`PriorGuidedAcquisitionFunction`."
+            )
         self.acq_func = acq_function
         self.prior_module = prior_module
         self._log = log
@@ -73,6 +84,7 @@ class PriorGuidedAcquisitionFunction(AcquisitionFunction):
 
     @concatenate_pending_points
     @t_batch_mode_transform()
+    @average_over_ensemble_models
     def forward(self, X: Tensor) -> Tensor:
         r"""Compute the acquisition function weighted by the prior."""
         # batch_shape x q

@@ -8,17 +8,19 @@ r"""General-purpose optimization utilities."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from logging import debug as logging_debug
-from typing import Callable, Optional, Tuple
 from warnings import warn_explicit, WarningMessage
 
 import numpy as np
+import numpy.typing as npt
+import scipy
 from linear_operator.utils.errors import NanError, NotPSDError
 
 
 def _handle_numerical_errors(
-    error: RuntimeError, x: np.ndarray, dtype: Optional[np.dtype] = None
-) -> Tuple[np.ndarray, np.ndarray]:
+    error: RuntimeError, x: npt.NDArray, dtype: np.dtype | None = None
+) -> tuple[npt.NDArray, npt.NDArray]:
     if isinstance(error, NotPSDError):
         raise error
     error_message = error.args[0] if len(error.args) > 0 else ""
@@ -34,8 +36,8 @@ def _handle_numerical_errors(
 
 def _warning_handler_template(
     w: WarningMessage,
-    debug: Optional[Callable[[WarningMessage], bool]] = None,
-    rethrow: Optional[Callable[[WarningMessage], bool]] = None,
+    debug: Callable[[WarningMessage], bool] | None = None,
+    rethrow: Callable[[WarningMessage], bool] | None = None,
 ) -> bool:
     r"""Helper for making basic warning handlers. Typically used with functools.partial.
 
@@ -58,3 +60,19 @@ def _warning_handler_template(
         return True
 
     return False
+
+
+def check_scipy_version_at_least(minor: int, major: int = 1) -> bool:
+    """
+    Check if SciPy version is at least major.minor.0.
+
+    Parameters
+    ----------
+    major: The major version to at least fulfill, always 1 for our purposes.
+    minor: The minor version as an int.
+
+    Returns
+    -------
+    bool: True if the SciPy version is major.minor.0 or later.
+    """
+    return tuple(map(int, scipy.__version__.split(".")[:2])) >= (major, minor)

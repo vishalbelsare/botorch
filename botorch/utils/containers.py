@@ -8,10 +8,12 @@ r"""Representations for different kinds of data."""
 
 from __future__ import annotations
 
+import dataclasses
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
 from typing import Any
 
+import torch
 from torch import device as Device, dtype as Dtype, LongTensor, Size, Tensor
 
 
@@ -19,14 +21,9 @@ class BotorchContainer(ABC):
     r"""Abstract base class for BoTorch's data containers.
 
     A BotorchContainer represents a tensor, which should be the sole object
-    returned by its `__call__` method. Said tensor is expected to consist of
+    returned by its ``__call__`` method. Said tensor is expected to consist of
     one or more "events" (e.g. data points or feature vectors), whose shape is
-    given by the required `event_shape` field.
-
-    Notice: Once version 3.10 becomes standard, this class should
-    be reworked to take advantage of dataclasses' `kw_only` flag.
-
-    :meta private:
+    given by the required ``event_shape`` field.
     """
 
     event_shape: Size
@@ -65,7 +62,7 @@ class BotorchContainer(ABC):
         raise AttributeError("Missing required field `event_shape`.")
 
 
-@dataclass(eq=False)
+@dataclass(eq=False, slots=True, kw_only=True)
 class DenseContainer(BotorchContainer):
     r"""Basic representation of data stored as a dense Tensor."""
 
@@ -96,7 +93,7 @@ class DenseContainer(BotorchContainer):
         return self.values.dtype
 
     def _validate(self) -> None:
-        super()._validate()
+        BotorchContainer._validate(self)
         for a, b in zip(reversed(self.event_shape), reversed(self.values.shape)):
             if a != b:
                 raise ValueError(
@@ -104,8 +101,11 @@ class DenseContainer(BotorchContainer):
                     f"`event shape` {self.event_shape}."
                 )
 
+    def clone(self) -> DenseContainer:
+        return dataclasses.replace(self)
 
-@dataclass(eq=False)
+
+@dataclass(eq=False, slots=True, kw_only=True)
 class SliceContainer(BotorchContainer):
     r"""Represent data points formed by concatenating (n-1)-dimensional slices
     taken from the leading dimension of an n-dimensional source tensor."""
@@ -138,7 +138,7 @@ class SliceContainer(BotorchContainer):
         return self.values.dtype
 
     def _validate(self) -> None:
-        super()._validate()
+        BotorchContainer._validate(self)
         values = self.values
         indices = self.indices
         assert indices.ndim > 1
@@ -151,3 +151,10 @@ class SliceContainer(BotorchContainer):
                 f"Shapes of `values` {values.shape} and `indices` "
                 f"{indices.shape} incompatible with `event_shape` {event_shape}."
             )
+
+    def clone(self) -> SliceContainer:
+        return type(self)(
+            values=self.values.clone(),
+            indices=self.indices.clone(),
+            event_shape=torch.Size(self.event_shape),
+        )
